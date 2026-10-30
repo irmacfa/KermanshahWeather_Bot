@@ -3,3 +3,7 @@ venv/
 *.log
 *.db
 .claude/
+__pycache__/
+*.pyc
+*.bak
+*~
