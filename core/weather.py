@@ -1,22 +1,58 @@
-"""هسته‌ی مشترک گرفتن اطلاعات باد از Open-Meteo — هم تلگرام و هم بله از این استفاده می‌کنند.
+"""هسته‌ی مشترک گرفتن اطلاعات باد از Windy — هم تلگرام و هم بله از این استفاده می‌کنند.
 
-نمایش پیش‌بینی به‌صورت برآورد احتمالی با تمرکز روی دو مدل اصلی (ECMWF و GFS) انجام می‌شه.
+نمایش پیش‌بینی به‌صورت برآورد احتمالی با تمرکز روی دو مدل اصلی (GFS و ICON) انجام می‌شه.
 """
 
-import httpx
+import asyncio
 import math
+import os
+import time
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
+import httpx
 
 from core.jalali import format_jalali_datetime
 
-OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
+WINDY_API_URL = "https://api.windy.com/api/point-forecast/v2"
+KERMANSHAH_LAT = 34.3142
+KERMANSHAH_LON = 47.0650
+TEHRAN_TZ = ZoneInfo("Asia/Tehran")
+CACHE_TTL_SECONDS = 600
+_CACHE: dict[tuple, tuple[float, dict]] = {}
 
-# پنج ماهواره‌ی هواشناسی تجاری که به‌صورت رایگان در اختیار این ربات قرار گرفته
+# مدل‌هایی که کلید فعلی Windy برای منطقه‌ی ایران پشتیبانی می‌کند
 MODELS = {
-    "ecmwf_ifs025": {"name": "ECMWF", "country": "اروپا", "flag": "🇪🇺", "theme": "🔷"},
-    "gfs_seamless": {"name": "GFS", "country": "آمریکا", "flag": "🇺🇸", "theme": "🦅"},
-    "icon_seamless": {"name": "ICON", "country": "آلمان", "flag": "🇩🇪", "theme": "⚙️"},
-    "gem_seamless": {"name": "GEM", "country": "کانادا", "flag": "🇨🇦", "theme": "🍁"},
-    "meteofrance_seamless": {"name": "Météo-France", "country": "فرانسه", "flag": "🇫🇷", "theme": "⚜️"},
+    "gfs": {"name": "GFS", "country": "آمریکا", "flag": "🇺🇸", "theme": "🦅"},
+    "icon": {"name": "ICON", "country": "آلمان", "flag": "🇩🇪", "theme": "⚙️"},
+}
+
+PRIMARY_MODELS = ("GFS", "ICON")
+
+WINDY_PARAMETERS = [
+    "temp",
+    "dewpoint",
+    "precip",
+    "convPrecip",
+    "snowPrecip",
+    "wind",
+    "windGust",
+    "cape",
+    "ptype",
+    "lclouds",
+    "mclouds",
+    "hclouds",
+    "rh",
+    "pressure",
+]
+
+PTYPE_DESCRIPTIONS = {
+    0: "بدون بارش ☀️",
+    1: "باران 🌧",
+    3: "باران یخ‌زده 🌧❄️",
+    5: "برف ❄️",
+    7: "مخلوط برف و باران 🌧❄️",
+    8: "تگرگ / گوی‌های یخی 🌨",
 }
 
 COMPASS_POINTS = [
@@ -30,7 +66,7 @@ WIND_ARROWS = ["⬆️", "↗️", "➡️", "↘️", "⬇️", "↙️", "⬅�
 FIXED_HOURS = [6, 8, 10, 12, 14, 16, 18]
 
 FOOTER_NOTE = (
-    "💼 این ماهواره‌ها تجاری هستن و به‌صورت رایگان در اختیار شما قرار گرفته‌اند."
+    "💼 داده‌های این پیش‌بینی از سرویس Windy دریافت شده است."
 )
 
 
@@ -116,43 +152,163 @@ def weather_line(code=None, cloud=None, precip=None, snow=None, temp=None) -> st
     return f"{emoji} وضعیت: {label}"
 
 
-def _extract_models(hourly: dict, idx: int) -> list[dict]:
-    results = []
-    for key, info in MODELS.items():
-        speeds = hourly.get(f"wind_speed_10m_{key}")
-        dirs = hourly.get(f"wind_direction_10m_{key}")
-        gusts = hourly.get(f"wind_gusts_10m_{key}")
-        if not speeds or speeds[idx] is None:
-            continue
-        cloud = _at(hourly, f"cloud_cover_{key}", idx)
-        precip = _at(hourly, f"precipitation_{key}", idx)
-        snow = _at(hourly, f"snowfall_{key}", idx)
-        code = _at(hourly, f"weather_code_{key}", idx)
-        temp = _at(hourly, f"temperature_2m_{key}", idx)
-        results.append(
-            {
-                "model": info["name"],
-                "country": info["country"],
-                "flag": info["flag"],
-                "theme": info["theme"],
-                "speed": speeds[idx],
-                "direction": dirs[idx],
-                "gust": gusts[idx] if gusts else None,
-                "cloud": cloud,
-                "precip": precip,
-                "snow": snow,
-                "code": code,
-                "temp": temp,
-            }
-        )
-    return results
+def _windy_payload(model_key: str, lat: float, lon: float, api_key: str) -> dict:
+    return {
+        "lat": lat,
+        "lon": lon,
+        "model": model_key,
+        "parameters": WINDY_PARAMETERS,
+        "levels": ["surface"],
+        "key": api_key,
+    }
 
 
-def _at(hourly: dict, field: str, idx: int):
-    values = hourly.get(field)
-    if not values or idx >= len(values):
+def _target_ms(target_time: str) -> int:
+    dt = datetime.fromisoformat(target_time)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=TEHRAN_TZ)
+    return int(dt.timestamp() * 1000)
+
+
+def _interp(timestamps: list, values: list, target: int):
+    if not timestamps or not values:
         return None
-    return values[idx]
+    pairs = [(t, v) for t, v in zip(timestamps, values) if v is not None]
+    if not pairs:
+        return None
+    if target <= pairs[0][0]:
+        return pairs[0][1]
+    if target >= pairs[-1][0]:
+        return pairs[-1][1]
+    for (t0, v0), (t1, v1) in zip(pairs, pairs[1:]):
+        if t0 <= target <= t1:
+            if t1 == t0:
+                return v0
+            ratio = (target - t0) / (t1 - t0)
+            return v0 + (v1 - v0) * ratio
+    return None
+
+
+def _nearest(timestamps: list, values: list, target: int):
+    if not timestamps or not values:
+        return None
+    pairs = [(t, v) for t, v in zip(timestamps, values) if v is not None]
+    if not pairs:
+        return None
+    return min(pairs, key=lambda pair: abs(pair[0] - target))[1]
+
+
+def _wind_direction(u: float, v: float) -> float:
+    return (math.degrees(math.atan2(-u, -v)) + 360) % 360
+
+
+def _wmo_code_from_conditions(ptype, precip, snow, cloud) -> int:
+    ptype = int(round(ptype)) if ptype is not None else None
+    if ptype == 5 or (snow is not None and snow > 0):
+        return 75 if snow is not None and snow >= 1 else 71
+    if ptype == 3:
+        return 66
+    if ptype == 7:
+        return 67
+    if ptype == 8:
+        return 96
+    if ptype == 1 or (precip is not None and precip > 0):
+        return 63 if precip is not None and precip >= 2 else 61
+    if cloud is None:
+        return 0
+    if cloud < 15:
+        return 0
+    if cloud < 50:
+        return 1
+    if cloud < 85:
+        return 2
+    return 3
+
+
+def _build_model_record(model_key: str, info: dict, data: dict, target: int):
+    timestamps = data.get("ts") or []
+    if not timestamps:
+        return None
+
+    temp_k = _interp(timestamps, data.get("temp-surface", []), target)
+    wind_u = _interp(timestamps, data.get("wind_u-surface", []), target)
+    wind_v = _interp(timestamps, data.get("wind_v-surface", []), target)
+    if temp_k is None or wind_u is None or wind_v is None:
+        return None
+
+    gust_ms = _nearest(timestamps, data.get("gust-surface", []), target)
+    cloud = _interp(timestamps, data.get("lclouds-surface", []), target)
+    precip = _nearest(timestamps, data.get("past3hprecip-surface", []), target)
+    snow = _nearest(timestamps, data.get("past3hsnowprecip-surface", []), target)
+    ptype = _nearest(timestamps, data.get("ptype-surface", []), target)
+
+    temp_c = temp_k - 273.15 if temp_k > 100 else temp_k
+    speed_kmh = math.hypot(wind_u, wind_v) * 3.6
+
+    return {
+        "model": info["name"],
+        "country": info["country"],
+        "flag": info["flag"],
+        "theme": info["theme"],
+        "speed": round(speed_kmh, 1),
+        "direction": round(_wind_direction(wind_u, wind_v), 1),
+        "gust": round(gust_ms * 3.6, 1) if gust_ms is not None else None,
+        "cloud": round(cloud, 1) if cloud is not None else None,
+        "precip": round(precip, 2) if precip is not None else None,
+        "snow": round(snow, 2) if snow is not None else None,
+        "code": _wmo_code_from_conditions(ptype, precip, snow, cloud),
+        "temp": round(temp_c, 1),
+    }
+
+
+def _records_at(data_map: dict[str, dict], target: int) -> list[dict]:
+    records = []
+    for key, data in data_map.items():
+        record = _build_model_record(key, MODELS[key], data, target)
+        if record is not None:
+            records.append(record)
+    return records
+
+
+async def _fetch_model(client: httpx.AsyncClient, model_key: str, lat: float, lon: float):
+    cache_key = (model_key, round(lat, 4), round(lon, 4))
+    now = time.monotonic()
+    cached = _CACHE.get(cache_key)
+    if cached and now - cached[0] < CACHE_TTL_SECONDS:
+        return cached[1]
+
+    api_key = os.getenv("WINDY_API_KEY")
+    if not api_key:
+        raise RuntimeError("WINDY_API_KEY تنظیم نشده است.")
+
+    response = await client.post(
+        WINDY_API_URL, json=_windy_payload(model_key, lat, lon, api_key)
+    )
+    if response.status_code == 204:
+        return None
+    response.raise_for_status()
+    data = response.json()
+    _CACHE[cache_key] = (now, data)
+    return data
+
+
+async def _fetch_models(lat: float, lon: float) -> dict[str, dict]:
+    async with httpx.AsyncClient(timeout=20) as client:
+        results = await asyncio.gather(
+            *(_fetch_model(client, key, lat, lon) for key in MODELS),
+            return_exceptions=True,
+        )
+
+    data_map: dict[str, dict] = {}
+    errors = []
+    for key, result in zip(MODELS, results):
+        if isinstance(result, Exception):
+            errors.append(result)
+        elif result:
+            data_map[key] = result
+    if not data_map and errors:
+        raise errors[0]
+    return data_map
 
 
 def _circular_mean_deg(degrees: list[float]) -> float:
@@ -179,7 +335,7 @@ def _safe_avg(values: list[float | None]) -> float | None:
 
 
 def compute_dual_estimate(models: list[dict]) -> dict | None:
-    """برآورد بر پایه دو مدل اصلی ECMWF و GFS (میانگین دقیق هرگاه هر دو موجود باشن)."""
+    """برآورد بر پایه دو مدل اصلی GFS و ICON (میانگین دقیق هرگاه هر دو موجود باشن)."""
     if not models:
         return None
 
@@ -187,11 +343,11 @@ def compute_dual_estimate(models: list[dict]) -> dict | None:
     if not valid:
         return None
 
-    main_list = [m for m in valid if m["model"] in ("ECMWF", "GFS")]
+    main_list = [m for m in valid if m["model"] in PRIMARY_MODELS]
 
-    if len(main_list) == 2:
-        core = main_list
-        method = "ecmwf_gfs_avg"
+    if len(main_list) >= 2:
+        core = main_list[:2]
+        method = "gfs_icon_avg"
     elif len(main_list) == 1:
         core = main_list
         method = "single_main"
@@ -236,61 +392,22 @@ def compute_dual_estimate(models: list[dict]) -> dict | None:
 
 
 async def get_multi_model_wind(lat: float, lon: float, target_time: str) -> list[dict]:
-    """پیش‌بینی یک ساعت مشخص رو از هر پنج ماهواره می‌گیره. target_time: 'YYYY-MM-DDTHH:00'."""
-    params = {
-        "latitude": lat,
-        "longitude": lon,
-        "hourly": "wind_speed_10m,wind_direction_10m,wind_gusts_10m,cloud_cover,precipitation,snowfall,weather_code,temperature_2m",
-        "wind_speed_unit": "kmh",
-        "timezone": "auto",
-        "forecast_days": 3,
-        "models": ",".join(MODELS.keys()),
-    }
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.get(OPEN_METEO_URL, params=params)
-        resp.raise_for_status()
-        data = resp.json()
-
-    hourly = data["hourly"]
-    try:
-        idx = hourly["time"].index(target_time)
-    except ValueError:
-        return []
-
-    return _extract_models(hourly, idx)
+    """پیش‌بینی یک ساعت مشخص رو از مدل‌های Windy می‌گیره. target_time: 'YYYY-MM-DDTHH:00'."""
+    data_map = await _fetch_models(lat, lon)
+    return _records_at(data_map, _target_ms(target_time))
 
 
 async def get_multi_model_daily(
     lat: float, lon: float, date_str: str, hours: list[int] | None = None
 ) -> dict[int, list[dict]]:
-    """پیش‌بینی چند ساعت مشخص از یک روز رو از هر پنج ماهواره، با یک درخواست می‌گیره."""
+    """پیش‌بینی چند ساعت مشخص از یک روز رو از مدل‌های Windy می‌گیره."""
     if hours is None:
         hours = FIXED_HOURS
 
-    params = {
-        "latitude": lat,
-        "longitude": lon,
-        "hourly": "wind_speed_10m,wind_direction_10m,wind_gusts_10m,cloud_cover,precipitation,snowfall,weather_code,temperature_2m",
-        "wind_speed_unit": "kmh",
-        "timezone": "auto",
-        "forecast_days": 3,
-        "models": ",".join(MODELS.keys()),
-    }
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.get(OPEN_METEO_URL, params=params)
-        resp.raise_for_status()
-        data = resp.json()
-
-    hourly = data["hourly"]
+    data_map = await _fetch_models(lat, lon)
     result: dict[int, list[dict]] = {}
     for h in hours:
-        target_time = f"{date_str}T{h:02d}:00"
-        try:
-            idx = hourly["time"].index(target_time)
-        except ValueError:
-            result[h] = []
-            continue
-        result[h] = _extract_models(hourly, idx)
+        result[h] = _records_at(data_map, _target_ms(f"{date_str}T{h:02d}:00"))
     return result
 
 
@@ -305,7 +422,7 @@ def format_models_message(
     if not models:
         return (
             f"{requested_line}📍 {location_name} — {time_label}\n\n"
-            "هیچ‌کدوم از ماهواره‌ها پیش‌بینی‌ای برای این ساعت ندارن."
+            "هیچ‌کدوم از مدل‌ها پیش‌بینی‌ای برای این ساعت ندارن."
             + _updated_line(updated_at)
         )
 
@@ -352,7 +469,7 @@ def format_dual_estimate_message(
 
     lines = [
         f"{requested_line}📍 {location_name} — {time_label}",
-        "🎯 برآورد احتمالی (میانگین دقیق ECMWF و GFS)",
+        "🎯 برآورد احتمالی (میانگین دقیق GFS و ICON)",
     ]
     if weather_row:
         lines.append(weather_row)
@@ -362,7 +479,7 @@ def format_dual_estimate_message(
         f"🧭 جهت: {degrees_to_compass(best['direction'])} {wind_arrow(best['direction'])}",
         f"📊 مبنا: {used}",
         "〰️〰️〰️〰️〰️",
-        "💡 فقط ECMWF و GFS در نظر گرفته شدن (میانگین ساده و دقیق هر دو مدل).",
+        "💡 فقط GFS و ICON در نظر گرفته شدن (میانگین ساده و دقیق هر دو مدل).",
         FOOTER_NOTE,
         _updated_line(updated_at),
     ]
@@ -372,7 +489,7 @@ def format_dual_estimate_message(
 def _updated_line(updated_at=None) -> str:
     if not updated_at:
         return ""
-    return f"\n\n🕐 آخرین بروزرسانی پیش‌بینی از منبع (Open-Meteo): {format_jalali_datetime(updated_at)} به‌وقت تهران"
+    return f"\n\n🕐 آخرین بروزرسانی پیش‌بینی از منبع (Windy): {format_jalali_datetime(updated_at)} به‌وقت تهران"
 
 
 def format_models_daily(
@@ -390,7 +507,7 @@ def format_models_daily(
 
     lines = [
         f"{requested_line}📅 {location_name} — {day_label}",
-        f"نمای کل روز (بر اساس {len(MODELS)} ماهواره — سرعت/گاست بر حسب KM/h)",
+        f"نمای کل روز (بر اساس {len(MODELS)} مدل — سرعت/گاست بر حسب KM/h)",
     ]
     for hour, models in records_by_hour.items():
         lines.append("")
@@ -431,7 +548,7 @@ def format_dual_estimate_daily(
 
     lines = [
         f"{requested_line}📅 {location_name} — {day_label}",
-        "🎯 برآورد احتمالی — نمای کل روز (میانگین دقیق ECMWF و GFS)",
+        "🎯 برآورد احتمالی — نمای کل روز (میانگین دقیق GFS و ICON)",
         "سرعت و گاست بر حسب KM/h",
     ]
 
@@ -452,6 +569,71 @@ def format_dual_estimate_daily(
         lines.append(f"🧭 جهت: {degrees_to_compass(best['direction'])} {wind_arrow(best['direction'])} • ({used})")
 
     lines.append("")
-    lines.append("💼 این ماهواره‌ها تجاری هستن و به‌صورت رایگان در اختیار شما قرار گرفته‌اند.")
+    lines.append(FOOTER_NOTE)
     lines.append(_updated_line(updated_at))
     return "\n".join(lines).rstrip()
+
+
+def get_kermanshah_weather(api_key: str | None = None) -> dict:
+    """دریافت وضعیت فعلی کرمانشاه از Windy برای استفاده‌های تک‌نقطه‌ای."""
+    token = api_key or os.getenv("WINDY_API_KEY")
+    if not token:
+        return {"error": "کلید API مربوط به Windy یافت نشد (.env را بررسی کنید)."}
+
+    try:
+        response = httpx.post(
+            WINDY_API_URL,
+            json=_windy_payload("gfs", KERMANSHAH_LAT, KERMANSHAH_LON, token),
+            timeout=20,
+        )
+        if response.status_code == 204:
+            return {"error": "مدل انتخابی پارامترهای درخواست‌شده را پشتیبانی نمی‌کند."}
+        if response.status_code != 200:
+            return {"error": f"خطا در دریافت اطلاعات از Windy (کد وضعیت: {response.status_code})"}
+        data = response.json()
+    except Exception as exc:
+        return {"error": f"خطا در ارتباط با سرور Windy: {exc}"}
+
+    timestamps = data.get("ts") or []
+    target = int(datetime.now(TEHRAN_TZ).timestamp() * 1000)
+    temp_k = _interp(timestamps, data.get("temp-surface", []), target)
+    wind_u = _interp(timestamps, data.get("wind_u-surface", []), target)
+    wind_v = _interp(timestamps, data.get("wind_v-surface", []), target)
+    if temp_k is None or wind_u is None or wind_v is None:
+        return {"error": "داده‌ای برای زمان فعلی در دسترس نیست."}
+
+    rh = _interp(timestamps, data.get("rh-surface", []), target)
+    pressure = _interp(timestamps, data.get("pressure-surface", []), target)
+    precip = _nearest(timestamps, data.get("past3hprecip-surface", []), target)
+    cloud = _interp(timestamps, data.get("lclouds-surface", []), target)
+    ptype = _nearest(timestamps, data.get("ptype-surface", []), target)
+    temp_c = temp_k - 273.15 if temp_k > 100 else temp_k
+    pressure_hpa = pressure / 100 if pressure is not None and pressure > 10000 else pressure
+
+    return {
+        "success": True,
+        "city": "کرمانشاه",
+        "temp": round(temp_c, 1),
+        "rh": round(rh, 1) if rh is not None else None,
+        "pressure": round(pressure_hpa, 1) if pressure_hpa is not None else None,
+        "wind_speed": round(math.hypot(wind_u, wind_v), 1),
+        "precip_3h": round(precip, 2) if precip is not None else 0,
+        "ptype": PTYPE_DESCRIPTIONS.get(int(round(ptype)), "نامشخص") if ptype is not None else "نامشخص",
+        "clouds": round(cloud, 1) if cloud is not None else None,
+    }
+
+
+def format_weather_message(weather_data: dict) -> str:
+    """فرمت‌دهی خروجی وضعیت آب‌وهوا برای نمایش در ربات."""
+    if "error" in weather_data or not weather_data.get("success"):
+        return f"⚠️ **خطا:** {weather_data.get('error', 'دریافت اطلاعات ناموفق بود.')}"
+
+    return (
+        f"🌤 **وضعیت آب و هوای {weather_data['city']}**\n\n"
+        f"🌡 **دما:** {weather_data['temp']} درجه سانتی‌گراد\n"
+        f"💧 **رطوبت نسبی:** {weather_data['rh']}%\n"
+        f"💨 **سرعت باد:** {weather_data['wind_speed']} متر بر ثانیه\n"
+        f"📊 **فشار هوا:** {weather_data['pressure']} hPa\n"
+        f"🌧 **وضعیت بارش:** {weather_data['ptype']}\n"
+        f"☁️ **پوشش ابر:** {weather_data['clouds']}%\n"
+    )
