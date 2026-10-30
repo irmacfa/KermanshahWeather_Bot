@@ -516,8 +516,25 @@ def manage_events_keyboard(events: list[dict]) -> InlineKeyboardMarkup:
         title = ev["title"][:40]
         status = "" if ev.get("active", 1) else " [بسته]"
         buttons.append([InlineKeyboardButton(f"#{ev['event_id']} {title}{status}", callback_data=f"me:view|{ev['event_id']}")])
-    buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data="ev:l|0")])
+    buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data="me:list")])
     return InlineKeyboardMarkup(buttons)
+
+
+def event_keyboard(event_id: int, attendee_count: int = 0) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("✅ حضور", callback_data=f"ev:a|{event_id}"),
+                InlineKeyboardButton("❌ لغو حضور", callback_data=f"ev:c|{event_id}"),
+            ],
+            [
+                InlineKeyboardButton(
+                    f"👥 حاضرین ({attendee_count})", callback_data=f"ev:v|{event_id}"
+                ),
+                InlineKeyboardButton("✏️ ثبت نام", callback_data=f"ev:n|{event_id}"),
+            ],
+        ]
+    )
 
 
 def manage_event_keyboard(event_id: int, active: int = 1) -> InlineKeyboardMarkup:
@@ -642,6 +659,11 @@ async def event_create_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         _remember_flow_message(context, prompt.chat_id, prompt.message_id, key="event_flow_msgs")
         return
     await _do_create_event(update, context, title)
+
+
+async def event_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    title = " ".join(context.args or []).strip()
+    await event_create_flow(update, context, title)
 
 
 async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1312,11 +1334,13 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("sites", start_command))
     app.add_handler(CommandHandler("name", name_command))
+    app.add_handler(CommandHandler("event", event_command))
     app.add_handler(CommandHandler("link", link_command))
     app.add_handler(CommandHandler("admin", admin_command))
     app.add_handler(CallbackQueryHandler(admin_callback, pattern=r"^ad:"))
     app.add_handler(CallbackQueryHandler(name_confirm_callback, pattern=r"^nc:"))
     app.add_handler(CallbackQueryHandler(event_callback, pattern=r"^ev:"))
+    app.add_handler(CallbackQueryHandler(manage_event_callback, pattern=r"^me:"))
     app.add_handler(CallbackQueryHandler(handle_site_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_error_handler(error_handler)
@@ -1401,28 +1425,102 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     await query.answer()
 
+    if kind == "main":
+        await query.edit_message_text(
+            _fmt(build_admin_home()), reply_markup=admin_main_keyboard(), **_html_kwargs()
+        )
+        return
+
+    if kind == "groups":
+        text, keyboard = build_groups_text()
+        await query.edit_message_text(_fmt(text), reply_markup=keyboard, **_html_kwargs())
+        return
+
+    if kind == "sites":
+        page = int(arg) if arg.isdigit() else 0
+        text, keyboard = build_sites_page(page)
+        await query.edit_message_text(_fmt(text), reply_markup=keyboard, **_html_kwargs())
+        return
+
+    if kind == "report":
+        parts = split_report_text(get_admin_report())
+        await query.edit_message_text(
+            parts[0],
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🏠 خانه", callback_data="ad:main")]]
+            ),
+            **_html_kwargs(),
+        )
+        for part in parts[1:]:
+            await query.message.chat.send_message(part, **_html_kwargs())
+        return
+
+    if kind == "settings":
+        text, keyboard = build_settings_page()
+        await query.edit_message_text(_fmt(text), reply_markup=keyboard, **_html_kwargs())
+        return
+
+    if kind == "ssite":
+        text, keyboard = build_default_site_page()
+        await query.edit_message_text(_fmt(text), reply_markup=keyboard, **_html_kwargs())
+        return
+
+    if kind == "dsite":
+        site_idx = int(arg) if arg.isdigit() else None
+        if site_idx is not None and 0 <= site_idx < len(SITES):
+            set_default_site(site_idx)
+        text, keyboard = build_settings_page()
+        await query.edit_message_text(_fmt(text), reply_markup=keyboard, **_html_kwargs())
+        return
+
+    if kind == "srchat":
+        set_report_chat(query.message.chat.id, _platform)
+        text, keyboard = build_settings_page()
+        await query.edit_message_text(_fmt(text), reply_markup=keyboard, **_html_kwargs())
+        return
+
+    if kind == "rchatclear":
+        set_report_chat(None, _platform)
+        text, keyboard = build_settings_page()
+        await query.edit_message_text(_fmt(text), reply_markup=keyboard, **_html_kwargs())
+        return
+
+    if kind == "rhours":
+        text, keyboard = build_hours_editor()
+        await query.edit_message_text(_fmt(text), reply_markup=keyboard, **_html_kwargs())
+        return
+
+    if kind == "rht":
+        hour = int(arg) if arg.isdigit() else None
+        if hour is not None and 0 <= hour <= 23:
+            enabled = set(get_report_hours())
+            if hour in enabled:
+                enabled.remove(hour)
+            else:
+                enabled.add(hour)
+            set_report_hours(sorted(enabled))
+        text, keyboard = build_hours_editor()
+        await query.edit_message_text(_fmt(text), reply_markup=keyboard, **_html_kwargs())
+        return
+
     if kind == "users":
-        await query.answer()
         page = int(arg) if arg.isdigit() else 0
         text, keyboard = build_users_page(page)
         await query.edit_message_text(_fmt(text), reply_markup=keyboard, **_html_kwargs())
         return
-    elif kind == "unreg":
-        await query.answer()
+    if kind == "unreg":
         page = int(arg) if arg.isdigit() else 0
         text, keyboard = build_unreg_page(page)
         await query.edit_message_text(_fmt(text), reply_markup=keyboard, **_html_kwargs())
         return
-    elif kind == "ureg":
-        await query.answer()
+    if kind == "ureg":
         p2 = arg.split("|")
         uid = int(p2[0]) if p2 and p2[0].isdigit() else None
         pg = int(p2[1]) if len(p2) > 1 and p2[1].isdigit() else 0
         context.user_data["admin_edit"] = {"type": "ureg", "user_id": uid, "page": pg}
         await query.message.reply_text("✏️ نام و نام خانوادگی کامل رو بنویس برای این کاربر:")
         return
-    elif kind == "uedit":
-        await query.answer()
+    if kind == "uedit":
         p2 = arg.split("|")
         uid = int(p2[0]) if p2 and p2[0].isdigit() else None
         plat = p2[1] if len(p2) > 1 else _platform
@@ -1435,8 +1533,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             **_html_kwargs(),
         )
         return
-    elif kind == "udel":
-        await query.answer("در حال حذف...")
+    if kind == "udel":
         p2 = arg.split("|")
         uid = int(p2[0]) if p2 and p2[0].isdigit() else None
         plat = p2[1] if len(p2) > 1 else _platform
@@ -1446,8 +1543,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         text, keyboard = build_users_page(pg)
         await query.edit_message_text(_fmt(text), reply_markup=keyboard, **_html_kwargs())
         return
-    elif kind == "settings":
-        await query.answer("بخش در حال تکمیل...", show_alert=False)
 
 
 def admin_unreg_keyboard(users: list, page: int = 0) -> InlineKeyboardMarkup:
@@ -1513,18 +1608,103 @@ def build_users_page(page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
 
 
 def build_groups_text() -> tuple[str, InlineKeyboardMarkup]:
+    groups = get_active_groups_data()
+    if not groups:
+        text = "👥 <b>گروه‌های فعال</b>\n\nربات هنوز به گروه فعالی اضافه نشده."
+    else:
+        lines = [f"👥 <b>گروه‌های فعال</b> ({len(groups)})", ""]
+        for i, (chat_id, title, added_by, last_seen) in enumerate(groups[:30], 1):
+            lines.append(
+                f"{i}. <b>{_esc(title or chat_id)}</b>\n"
+                f"   <code>{chat_id}</code> — ➕ {_esc(added_by or '-')}"
+            )
+            if last_seen:
+                lines.append(f"   🕐 {_esc(format_time(last_seen))}")
+        if len(groups) > 30:
+            lines.append(f"… و {len(groups) - 30} گروه دیگر")
+        text = "\n".join(lines)
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 خانه", callback_data="ad:main")]])
-    return "گروه‌ها", keyboard
+    return text, keyboard
 
 
 def build_sites_page(page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
-    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 خانه", callback_data="ad:main")]])
-    return "سایت‌ها", keyboard
+    sites = get_top_sites(1000)
+    total = len(sites)
+    max_page = max(0, (total - 1) // ADMIN_PAGE_SIZE)
+    page = min(max(page, 0), max_page)
+    start = page * ADMIN_PAGE_SIZE
+    slice_ = sites[start : start + ADMIN_PAGE_SIZE]
+
+    if not sites:
+        text = "🌐 <b>سایت‌های محبوب</b>\n\nهنوز بازدیدی از سایت‌ها ثبت نشده."
+    else:
+        lines = [f"🌐 <b>سایت‌های محبوب</b> ({total})", ""]
+        for i, (name, views) in enumerate(slice_, start + 1):
+            lines.append(f"{i}. <b>{_esc(name)}</b> — {views} بازدید")
+        text = "\n".join(lines)
+
+    rows = []
+    if total > ADMIN_PAGE_SIZE:
+        rows.append(_pager_row("sites", page, total))
+    rows.append([InlineKeyboardButton("🏠 خانه", callback_data="ad:main")])
+    return text, InlineKeyboardMarkup(rows)
+
+
+def build_settings_page() -> tuple[str, InlineKeyboardMarkup]:
+    settings = get_settings(_platform)
+    site_idx = settings["default_site_idx"]
+    site_name = SITES[site_idx][0] if site_idx is not None and 0 <= site_idx < len(SITES) else "تنظیم نشده"
+    report_chat = settings["report_chat_id"]
+    hours = get_report_hours()
+    hours_label = "، ".join(f"{h:02d}" for h in hours) if hours else "هیچ ساعتی فعال نیست"
+
+    text = (
+        "⚙️ <b>تنظیمات ربات</b>\n\n"
+        f"📍 سایت پیش‌فرض: <b>{_esc(site_name)}</b>\n"
+        f"📥 مقصد گزارش: <code>{report_chat if report_chat is not None else 'تنظیم نشده'}</code>\n"
+        f"🕐 ساعت‌های گزارش: {_esc(hours_label)}\n\n"
+        "یکی از گزینه‌ها رو انتخاب کن:"
+    )
+    keyboard = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("📍 انتخاب سایت پیش‌فرض", callback_data="ad:ssite")],
+            [InlineKeyboardButton("📥 مقصد گزارش = همین چت", callback_data="ad:srchat")],
+            [InlineKeyboardButton("🧹 حذف مقصد گزارش", callback_data="ad:rchatclear")],
+            [InlineKeyboardButton("🕐 ساعت‌های گزارش", callback_data="ad:rhours")],
+            [InlineKeyboardButton("🏠 خانه", callback_data="ad:main")],
+        ]
+    )
+    return text, keyboard
+
+
+def build_default_site_page() -> tuple[str, InlineKeyboardMarkup]:
+    current = get_settings(_platform)["default_site_idx"]
+    rows = []
+    for i, site in enumerate(SITES):
+        mark = "✅ " if current == i else ""
+        rows.append([InlineKeyboardButton(f"{mark}{site[0]}", callback_data=f"ad:dsite|{i}")])
+    rows.append([InlineKeyboardButton("🔙 تنظیمات", callback_data="ad:settings")])
+    return "📍 <b>سایت پیش‌فرض را انتخاب کن:</b>", InlineKeyboardMarkup(rows)
 
 
 def build_hours_editor() -> tuple[str, InlineKeyboardMarkup]:
-    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 خانه", callback_data="ad:main")]])
-    return "ساعات", keyboard
+    enabled = set(get_report_hours())
+    rows, row = [], []
+    for hour in range(24):
+        label = f"{'✅' if hour in enabled else '▫️'} {hour:02d}"
+        row.append(InlineKeyboardButton(label, callback_data=f"ad:rht|{hour}"))
+        if len(row) == 4:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("🔙 تنظیمات", callback_data="ad:settings")])
+    text = (
+        "🕐 <b>ساعت‌های ارسال گزارش</b>\n\n"
+        "روی هر ساعت بزن تا فعال/غیرفعال شود.\n"
+        f"فعال: {len(enabled)} ساعت"
+    )
+    return text, InlineKeyboardMarkup(rows)
 
 
 def manage_attendees_keyboard(event_id: int, attendees: list[dict], page: int = 0) -> InlineKeyboardMarkup:
