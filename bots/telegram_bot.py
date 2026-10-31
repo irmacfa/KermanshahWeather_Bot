@@ -1138,16 +1138,21 @@ def pick_model_keyboard(owner_id: int, site_idx: int, mode: str, day: str | None
 
 
 def split_report_text(text: str, max_len: int = 3900) -> list[str]:
-    marker = "\n🕐 "
+    if not text:
+        return []
     parts: list[str] = []
     current = ""
-    for i, seg in enumerate(text.split(marker)):
-        frag = seg if i == 0 else marker.lstrip() + seg
-        if len(current) + len(frag) > max_len and current:
+    for line in text.splitlines(keepends=True):
+        if len(current) + len(line) > max_len and current:
             parts.append(current.rstrip())
-            current = frag
-        else:
-            current += frag
+            current = ""
+        while len(line) > max_len:
+            if current:
+                parts.append(current.rstrip())
+                current = ""
+            parts.append(line[:max_len].rstrip())
+            line = line[max_len:]
+        current += line
     if current:
         parts.append(current.rstrip())
     return parts

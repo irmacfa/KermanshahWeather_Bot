@@ -641,9 +641,9 @@ def delete_event_group(event_id: int) -> None:
     group_id = event.get("group_id") if event else event_id
     conn = _get_conn()
     with conn:
+        conn.execute("DELETE FROM event_refresh_queue WHERE event_id IN (SELECT event_id FROM events WHERE group_id = ?)", (group_id,))
         conn.execute("DELETE FROM event_attendance WHERE event_id IN (SELECT event_id FROM events WHERE group_id = ?)", (group_id,))
         conn.execute("DELETE FROM events WHERE group_id = ?", (group_id,))
-        conn.execute("DELETE FROM event_refresh_queue WHERE event_id IN (SELECT event_id FROM events WHERE group_id = ?)", (group_id,))
     conn.close()
 
 
