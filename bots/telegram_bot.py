@@ -1368,9 +1368,12 @@ async def hourly_report_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     date_str = now.date().isoformat()
 
     enabled_hours = set(get_report_hours())
-    remaining_hours = [h for h in ADMIN_OVERVIEW_HOURS if h >= now.hour and h in enabled_hours]
+    if now.hour not in enabled_hours:
+        logger.info("Report hour %02d is disabled, skipping report for %s", now.hour, name)
+        return
+    remaining_hours = [h for h in sorted(enabled_hours) if h >= now.hour]
     if not remaining_hours:
-        logger.info("No enabled/remaining report hours now, skipping report for %s", name)
+        logger.info("No remaining report hours now, skipping report for %s", name)
         return
 
     try:
