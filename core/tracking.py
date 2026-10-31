@@ -681,8 +681,6 @@ def remove_attendee_from_group(event_id: int, user_id: int) -> bool:
     if group_id:
         enqueue_group_refresh(group_id)
     return removed
-    events = get_events_for_chat(chat_id, platform)
-    return get_event(events[0]["event_id"]) if events else None
 
 
 def get_group_events(event_id: int) -> list[dict]:

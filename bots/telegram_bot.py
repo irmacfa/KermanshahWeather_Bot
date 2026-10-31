@@ -41,7 +41,6 @@ from core.tracking import (
     get_group_users_unregistered,
     get_latest_event_for_chat,
     get_pending_refreshes,
-    get_private_users_detailed,
     get_profile,
     get_report_hours,
     get_settings,
@@ -68,7 +67,6 @@ from core.tracking import (
 from core.weather import (
     FIXED_HOURS,
     format_dual_estimate_daily,
-    format_dual_estimate_message,
     format_models_daily,
     format_models_message,
     get_multi_model_daily,
@@ -1082,41 +1080,6 @@ async def handle_site_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
 def model_view_keyboard(owner_id: int, site_idx: int, mode: str, day: str | None = None, hour: int | None = None) -> InlineKeyboardMarkup:
-    if mode == "now":
-        return InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton("📊 همه مدل‌ها", callback_data=f"{owner_id}:mv|{site_idx}|now|all"),
-                    InlineKeyboardButton("🔍 انتخاب یک مدل", callback_data=f"{owner_id}:mv|{site_idx}|now|pick"),
-                ],
-                [InlineKeyboardButton("🔙 بازگشت به سایت‌ها", callback_data=f"{owner_id}:b|sites")],
-            ]
-        )
-    if mode == "hour":
-        base_day = day or "today"
-        return InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton("📊 همه مدل‌ها", callback_data=f"{owner_id}:mv|{site_idx}|h|{base_day}|{hour}|all"),
-                    InlineKeyboardButton("🔍 انتخاب یک مدل", callback_data=f"{owner_id}:mv|{site_idx}|h|{base_day}|{hour}|pick"),
-                ],
-                [InlineKeyboardButton("🔙 تغییر ساعت", callback_data=f"{owner_id}:t|{site_idx}|{base_day}")],
-            ]
-        )
-    if mode == "day":
-        base_day = day or "today"
-        return InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton("📊 همه مدل‌ها", callback_data=f"{owner_id}:mv|{site_idx}|d|{base_day}|all"),
-                    InlineKeyboardButton("🔍 انتخاب یک مدل", callback_data=f"{owner_id}:mv|{site_idx}|d|{base_day}|pick"),
-                ],
-                [InlineKeyboardButton("🔙 تغییر روز", callback_data=f"{owner_id}:s|{site_idx}")],
-            ]
-        )
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به سایت‌ها", callback_data=f"{owner_id}:b|sites")]])
-
-
     if mode == "now":
         return InlineKeyboardMarkup(
             [
