@@ -1,6 +1,7 @@
 venv/
 .env
 *.log
+*.log.*
 *.db
 .claude/
 __pycache__/

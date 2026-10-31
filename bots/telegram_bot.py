@@ -6,6 +6,7 @@ import re
 import sys
 from collections import deque
 from datetime import datetime, timedelta, timezone
+from logging.handlers import RotatingFileHandler
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
@@ -81,8 +82,18 @@ _platform = os.getenv("BOT_PLATFORM", "telegram").lower()
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
-    handlers=[logging.FileHandler(f"bot_{_platform}.log"), logging.StreamHandler()],
+    handlers=[
+        RotatingFileHandler(
+            f"bot_{_platform}.log",
+            maxBytes=5 * 1024 * 1024,
+            backupCount=3,
+            encoding="utf-8",
+        ),
+        logging.StreamHandler(),
+    ],
 )
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 HTML_OK = _platform != "bale"
@@ -1231,7 +1242,6 @@ async def track_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 ADMIN_PAGE_SIZE = 8
-ADMIN_OVERVIEW_HOURS = list(range(7, 20))
 
 
 def _esc(s) -> str:
