@@ -1627,6 +1627,11 @@ def main() -> None:
         logger.info("Hourly report job scheduled to run at the start of every hour (%s)", platform)
 
     logger.info("%s bot starting (polling)...", platform)
+
+    # Python 3.14 no longer implicitly creates a main-thread event loop.
+    # asyncio.run() above also closes its loop after proxy selection.
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
     app.run_polling(allowed_updates=allowed_updates)
 
 
