@@ -263,7 +263,24 @@ async def _deliver_name_prompt(
     remember_trigger: bool = False,
     prefer_dm: bool = True,
 ) -> bool:
-    if context.user_data.get("awaiting_name"):
+    # Do not overwrite an unfinished name flow for this user.
+    if context.user_data.get("awaiting_name") or context.user_data.get("pending_name") is not None:
+        notice = (
+            "یه ثبت‌نام نیمه‌کاره داری.\n"
+            "اول همون رو با دکمه «تأیید» یا «ویرایش» تموم کن؛ "
+            "بعد برای ایونت بعدی ثبت‌نام کن."
+        )
+        try:
+            await context.bot.send_message(chat_id=user.id, text=notice)
+        except Exception:
+            try:
+                await context.bot.send_message(
+                    chat_id=trigger_chat_id,
+                    text=notice,
+                    reply_to_message_id=trigger_message_id,
+                )
+            except Exception:
+                logger.debug("Could not notify user about pending name flow")
         return False
     context.user_data["awaiting_name"] = True
     context.user_data["pending_action"] = pending or {"type": "none"}
