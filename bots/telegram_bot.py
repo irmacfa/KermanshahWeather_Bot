@@ -881,6 +881,10 @@ async def event_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     if not event.get("active", 1):
         await query.answer("این برنامه بسته شده.", show_alert=True)
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            logger.debug("Could not clear closed event keyboard", exc_info=True)
         return
 
     if kind == "s":
@@ -2070,6 +2074,8 @@ async def manage_event_callback(update: Update, context: ContextTypes.DEFAULT_TY
             return
         await query.edit_message_text("حضور آن نفر حذف شد.", reply_markup=manage_attendees_keyboard(event_id, attendees, page))
         return
+
+    await query.answer("عملیات مدیریت شناخته نشد.", show_alert=True)
 
 
 async def name_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
