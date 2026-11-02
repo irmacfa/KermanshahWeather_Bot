@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import html
 import math
 import os
 import time
@@ -418,7 +419,7 @@ def format_models_message(
     requested_by: str | None = None,
     updated_at=None,
 ) -> str:
-    requested_line = f"🙋 به درخواست {requested_by}\n\n" if requested_by else ""
+    requested_line = f"🙋 به درخواست {html.escape(str(requested_by))}\n\n" if requested_by else ""
     if not models:
         return (
             f"{requested_line}📍 {location_name} — {time_label}\n\n"
@@ -450,7 +451,7 @@ def format_dual_estimate_message(
     requested_by: str | None = None,
     updated_at=None,
 ) -> str:
-    requested_line = f"🙋 به درخواست {requested_by}\n\n" if requested_by else ""
+    requested_line = f"🙋 به درخواست {html.escape(str(requested_by))}\n\n" if requested_by else ""
     best = compute_dual_estimate(models)
 
     if not best or not models:
@@ -499,7 +500,7 @@ def format_models_daily(
     requested_by: str | None = None,
     updated_at=None,
 ) -> str:
-    requested_line = f"🙋 به درخواست {requested_by}\n\n" if requested_by else ""
+    requested_line = f"🙋 به درخواست {html.escape(str(requested_by))}\n\n" if requested_by else ""
     if not records_by_hour or not any(records_by_hour.values()):
         return f"{requested_line}📅 {location_name} — {day_label}\n\nپیش‌بینی‌ای برای این روز در دسترس نیست." + _updated_line(
             updated_at
@@ -540,7 +541,7 @@ def format_dual_estimate_daily(
     requested_by: str | None = None,
     updated_at=None,
 ) -> str:
-    requested_line = f"🙋 به درخواست {requested_by}\n\n" if requested_by else ""
+    requested_line = f"🙋 به درخواست {html.escape(str(requested_by))}\n\n" if requested_by else ""
     if not records_by_hour or not any(records_by_hour.values()):
         return f"{requested_line}📅 {location_name} — {day_label}\n\nپیش‌بینی‌ای برای این روز در دسترس نیست." + _updated_line(
             updated_at
