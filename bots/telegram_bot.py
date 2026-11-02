@@ -359,15 +359,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if (
         context.user_data.get("awaiting_event_title")
-        and context.user_data.get("awaiting_event_title_chat_id", message.chat_id) == message.chat_id
+        and context.user_data.get("awaiting_event_title_chat_id") == message.chat_id
     ):
+        if not text or len(text) < 3 or len(text) > 80 or "\\n" in text or text.startswith("/"):
+            await message.reply_text("عنوان باید یک خط و بین ۳ تا ۸۰ نویسه باشد. فقط عنوان برنامه را بفرست:")
+            return
         context.user_data.pop("awaiting_event_title", None)
         context.user_data.pop("awaiting_event_title_chat_id", None)
-        if not text:
-            context.user_data["awaiting_event_title"] = True
-            await message.reply_text("عنوان برنامه نمی‌تونه خالی باشه. دوباره بنویس:")
-            return
-        await _do_create_event(update, context, text)
+        await _show_event_draft(update, context, text)
         return
 
     me_action = context.user_data.get("me_action")
@@ -732,6 +731,80 @@ async def _can_manage_event(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     return False
 
 
+def event_draft_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ تأیید و انتشار", callback_data="ec:p")],
+        [InlineKeyboardButton("✏️ ویرایش عنوان", callback_data="ec:e"),
+         InlineKeyboardButton("لغو", callback_data="ec:x")],
+    ])
+
+
+async def _show_event_draft(update: Update, context: ContextTypes.DEFAULT_TYPE, title: str) -> None:
+    message = update.message or update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if message is None or chat is None or user is None:
+        return
+    context.user_data["event_draft"] = {
+        "title": title.strip(),
+        "chat_id": chat.id,
+        "user_id": user.id,
+        "platform": _platform,
+    }
+    preview = (
+        "📋 <b>پیش‌نمایش ایونت</b>\n\n"
+        f"عنوان: <b>{html.escape(title.strip())}</b>\n\n"
+        "این ایونت هنوز منتشر نشده است. اطلاعات را بررسی کن؛ "
+        "برای انتشار باید دکمه تأیید را بزنی."
+    )
+    await message.chat.send_message(
+        _fmt(preview), reply_markup=event_draft_keyboard(), **_html_kwargs()
+    )
+
+
+async def event_draft_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None or query.message is None:
+        return
+    draft = context.user_data.get("event_draft")
+    if not draft:
+        await query.answer("پیش‌نویس پیدا نشد؛ دوباره ایونت بساز.", show_alert=True)
+        return
+    if (
+        draft.get("chat_id") != query.message.chat.id
+        or draft.get("user_id") != query.from_user.id
+        or draft.get("platform") != _platform
+    ):
+        await query.answer("این پیش‌نویس متعلق به شما یا این گروه نیست.", show_alert=True)
+        return
+    if not await _can_manage_event(update, context):
+        await query.answer("فقط ادمین می‌تواند ایونت را منتشر کند.", show_alert=True)
+        return
+
+    action = query.data.split(":", 1)[1]
+    if action == "e":
+        context.user_data["awaiting_event_title"] = True
+        context.user_data["awaiting_event_title_chat_id"] = query.message.chat.id
+        context.user_data.pop("event_draft", None)
+        await query.answer()
+        await query.edit_message_text("✏️ عنوان جدید ایونت را در یک پیام بفرست (۳ تا ۸۰ نویسه):")
+        return
+    if action == "x":
+        context.user_data.pop("event_draft", None)
+        await query.answer("پیش‌نویس لغو شد.")
+        await query.edit_message_text("ایجاد ایونت لغو شد؛ چیزی در گروه منتشر نشد.")
+        return
+    if action != "p":
+        await query.answer("عملیات نامعتبر است.", show_alert=True)
+        return
+
+    title = draft["title"]
+    context.user_data.pop("event_draft", None)
+    await query.answer("در حال انتشار…")
+    await query.edit_message_text("✅ تأیید شد؛ ایونت در حال انتشار است.")
+    await _do_create_event(update, context, title)
+
+
 async def _do_create_event(update: Update, context: ContextTypes.DEFAULT_TYPE, title: str) -> None:
     message = update.message or update.effective_message
     chat_id = update.effective_chat.id
@@ -793,7 +866,7 @@ async def event_create_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         )
         _remember_flow_message(context, prompt.chat_id, prompt.message_id, key="event_flow_msgs")
         return
-    await _do_create_event(update, context, title)
+    await _show_event_draft(update, context, title)
 
 
 async def event_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1536,6 +1609,7 @@ def main() -> None:
     app.add_handler(CommandHandler("admin", admin_command))
     app.add_handler(CallbackQueryHandler(admin_callback, pattern=r"^ad:"))
     app.add_handler(CallbackQueryHandler(name_confirm_callback, pattern=r"^nc:"))
+    app.add_handler(CallbackQueryHandler(event_draft_callback, pattern=r"^ec:"))
     app.add_handler(CallbackQueryHandler(event_callback, pattern=r"^ev:"))
     app.add_handler(CallbackQueryHandler(manage_event_callback, pattern=r"^me:"))
     app.add_handler(CallbackQueryHandler(handle_site_callback))
