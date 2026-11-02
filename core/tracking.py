@@ -618,22 +618,38 @@ def get_latest_event_for_chat(chat_id: int, platform: str = "telegram") -> dict 
 
 def update_event_title(event_id: int, title: str) -> None:
     conn = _get_conn()
+    row = conn.execute(
+        "SELECT group_id FROM events WHERE event_id = ?", (event_id,)
+    ).fetchone()
+    if not row:
+        conn.close()
+        return
+    group_id = row[0] or event_id
     with conn:
         conn.execute(
-            "UPDATE events SET title = ? WHERE event_id = ?",
-            ((title or "").strip(), event_id),
+            "UPDATE events SET title = ? WHERE group_id = ?",
+            ((title or "").strip(), group_id),
         )
     conn.close()
+    enqueue_group_refresh(group_id)
 
 
 def set_event_active(event_id: int, active: bool) -> None:
     conn = _get_conn()
+    row = conn.execute(
+        "SELECT group_id FROM events WHERE event_id = ?", (event_id,)
+    ).fetchone()
+    if not row:
+        conn.close()
+        return
+    group_id = row[0] or event_id
     with conn:
         conn.execute(
-            "UPDATE events SET active = ? WHERE event_id = ?",
-            (1 if active else 0, event_id),
+            "UPDATE events SET active = ? WHERE group_id = ?",
+            (1 if active else 0, group_id),
         )
     conn.close()
+    enqueue_group_refresh(group_id)
 
 
 def delete_event_group(event_id: int) -> None:
