@@ -724,8 +724,14 @@ async def process_event_refreshes(context: ContextTypes.DEFAULT_TYPE) -> None:
                 **_html_kwargs(),
             )
         except Exception:
-            logger.debug("Refresh failed for event %s", event["event_id"], exc_info=True)
-        clear_refresh(event["event_id"])
+            # Keep the item queued so transient Telegram/API failures can be retried.
+            logger.warning(
+                "Refresh failed for event %s; it will be retried",
+                event["event_id"],
+                exc_info=True,
+            )
+        else:
+            clear_refresh(event["event_id"])
 
 
 async def event_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1585,11 +1591,26 @@ def admin_unreg_keyboard(users: list, page: int = 0) -> InlineKeyboardMarkup:
 
 
 def build_unreg_page(page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
-    users = []
+    # Keep the current group as the default, but allow configuration per deployment.
+    raw_chat_id = os.getenv("UNREGISTERED_USERS_CHAT_ID", "-1002297819434").strip()
     try:
-        users = get_group_users_unregistered(-1002297819434, _platform)
+        chat_id = int(raw_chat_id)
+    except ValueError:
+        logger.error("UNREGISTERED_USERS_CHAT_ID must be an integer")
+        return (
+            "⚠️ شناسه گروه ثبت‌نام‌نشده‌ها در تنظیمات معتبر نیست.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("🏠 خانه", callback_data="ad:main")]]),
+        )
+
+    try:
+        users = get_group_users_unregistered(chat_id, _platform)
     except Exception:
-        pass
+        logger.exception("Could not load unregistered users for chat %s", chat_id)
+        return (
+            "⚠️ دریافت فهرست کاربران ثبت‌نام‌نشده با خطا مواجه شد.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("🏠 خانه", callback_data="ad:main")]]),
+        )
+
     if not users:
         return "👥 <b>ثبت‌نام نشده‌های گروه</b>\n\nهمهٔ اعضای فعال ثبت‌نام شده‌اند.", InlineKeyboardMarkup([[InlineKeyboardButton("🏠 خانه", callback_data="ad:main")]])
     return f"👥 <b>ثبت‌نام نشده‌های گروه</b> ({len(users)})\n\nبا کلیک روی هر نفر میشه اسمش رو ثبت کنی:", admin_unreg_keyboard(users, page)
