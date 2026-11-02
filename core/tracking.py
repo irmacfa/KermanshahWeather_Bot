@@ -654,8 +654,9 @@ def update_attendee_name_in_group(event_id: int, user_id: int, first_name: str, 
     conn = _get_conn()
     with conn:
         conn.execute(
-            "UPDATE event_attendance SET first_name = ?, last_name = ? WHERE user_id = ? AND event_id IN (SELECT event_id FROM events WHERE group_id = ?)",
-            ((first_name or "").strip() or None, (last_name or "").strip() or None, user_id, group_id),
+            "UPDATE event_attendance SET first_name = ?, last_name = ? WHERE user_id = ? AND event_id IN "
+            "(SELECT event_id FROM events WHERE group_id = ? AND platform = ?)",
+            ((first_name or "").strip() or None, (last_name or "").strip() or None, user_id, group_id, platform),
         )
         if full_name:
             conn.execute(
@@ -667,14 +668,15 @@ def update_attendee_name_in_group(event_id: int, user_id: int, first_name: str, 
     enqueue_group_refresh(group_id)
 
 
-def remove_attendee_from_group(event_id: int, user_id: int) -> bool:
+def remove_attendee_from_group(event_id: int, user_id: int, platform: str = "telegram") -> bool:
     event = get_event(event_id)
     group_id = event.get("group_id") if event else event_id
     conn = _get_conn()
     with conn:
         cur = conn.execute(
-            "DELETE FROM event_attendance WHERE user_id = ? AND event_id IN (SELECT event_id FROM events WHERE group_id = ?)",
-            (user_id, group_id),
+            "DELETE FROM event_attendance WHERE user_id = ? AND event_id IN "
+            "(SELECT event_id FROM events WHERE group_id = ? AND platform = ?)",
+            (user_id, group_id, platform),
         )
         removed = cur.rowcount > 0
     conn.close()
@@ -776,14 +778,14 @@ def record_attendance(event_id: int, user, name: str | None = None, platform: st
     return existing is None
 
 
-def remove_attendance(event_id: int, user_id: int) -> bool:
+def remove_attendance(event_id: int, user_id: int, platform: str = "telegram") -> bool:
     event = get_event(event_id)
     conn = _get_conn()
     with conn:
         cur = conn.execute(
             "DELETE FROM event_attendance WHERE user_id = ? AND event_id IN "
-            "(SELECT event_id FROM events WHERE group_id = ?)",
-            (user_id, event["group_id"] if event else event_id),
+            "(SELECT event_id FROM events WHERE group_id = ? AND platform = ?)",
+            (user_id, event["group_id"] if event else event_id, platform),
         )
         removed = cur.rowcount > 0
     conn.close()

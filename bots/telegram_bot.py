@@ -357,9 +357,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if context.user_data.get("awaiting_event_title"):
         context.user_data.pop("awaiting_event_title", None)
-        if text:
-            await _do_create_event(update, context, text)
+        if not text:
+            context.user_data["awaiting_event_title"] = True
+            await message.reply_text("عنوان برنامه نمی‌تونه خالی باشه. دوباره بنویس:")
             return
+        await _do_create_event(update, context, text)
+        return
 
     me_action = context.user_data.pop("me_action", None)
     if me_action:
@@ -382,10 +385,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             eid = me_action.get("event_id")
             uid = me_action.get("user_id")
             page = me_action.get("page") or 0
+            platform = me_action.get("platform") or _platform
             partsn = text.strip().split(None, 1)
             fn = partsn[0] if partsn else text.strip()
             ln = partsn[1] if len(partsn) > 1 else None
-            update_attendee_name_in_group(eid, uid, fn, ln, platform=_platform)
+            update_attendee_name_in_group(eid, uid, fn, ln, platform=platform)
             try:
                 ev = get_event(eid)
                 attendees = get_attendees(eid)
@@ -439,7 +443,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             _remember_flow_message(context, hint.chat_id, hint.message_id)
             return
         context.user_data.pop("awaiting_name", None)
-        pending = context.user_data.pop("pending_action", None) or {}
         context.user_data["pending_name"] = text.strip()
         context.user_data["pending_name_msg"] = {"chat_id": message.chat_id, "message_id": message.message_id}
         confirm = await message.chat.send_message(
@@ -798,7 +801,7 @@ async def event_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         is_new = record_attendance(event_id, query.from_user, platform=_platform)
         await query.answer("حضور شما ثبت شد ✅" if is_new else "شما قبلاً ثبت شده‌اید ✅")
     elif kind == "c":
-        removed = remove_attendance(event_id, query.from_user.id)
+        removed = remove_attendance(event_id, query.from_user.id, platform=_platform)
         await query.answer("حضور شما لغو شد." if removed else "شما در لیست نبودید.")
     elif kind == "v":
         await query.answer()
@@ -1731,11 +1734,12 @@ def manage_attendees_keyboard(event_id: int, attendees: list[dict], page: int = 
     buttons = []
     for a in slice_:
         label = _event_display_name(a["first_name"], a["last_name"], a["username"])
+        platform = a.get("platform") or _platform
         buttons.append(
             [
                 InlineKeyboardButton(label[:35], callback_data=f"me:noop|0"),
-                InlineKeyboardButton("✏️ نام", callback_data=f"me:an|{event_id}|{a['user_id']}|{page}"),
-                InlineKeyboardButton("❌ حذف", callback_data=f"me:ar|{event_id}|{a['user_id']}|{page}"),
+                InlineKeyboardButton("✏️ نام", callback_data=f"me:an|{event_id}|{a['user_id']}|{page}|{platform}"),
+                InlineKeyboardButton("❌ حذف", callback_data=f"me:ar|{event_id}|{a['user_id']}|{page}|{platform}"),
             ]
         )
     nav = []
@@ -1844,7 +1848,8 @@ async def manage_event_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await query.answer()
         user_id = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
         page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
-        context.user_data["me_action"] = {"type": "rename_att", "event_id": event_id, "user_id": user_id, "page": page}
+        platform = parts[3] if len(parts) > 3 and parts[3] else _platform
+        context.user_data["me_action"] = {"type": "rename_att", "event_id": event_id, "user_id": user_id, "page": page, "platform": platform}
         await query.message.reply_text("✏️ نام و نام خانوادگی جدید رو بنویس (مثال: علی رضایی):")
         return
 
@@ -1852,7 +1857,8 @@ async def manage_event_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await query.answer()
         user_id = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
         page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
-        removed = remove_attendee_from_group(event_id, user_id)
+        platform = parts[3] if len(parts) > 3 and parts[3] else _platform
+        remove_attendee_from_group(event_id, user_id, platform=platform)
         try:
             attendees = get_attendees(event_id)
             ev = get_event(event_id)
