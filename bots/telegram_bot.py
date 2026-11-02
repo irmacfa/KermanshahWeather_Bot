@@ -4,6 +4,8 @@ import logging
 import os
 import re
 import sys
+
+import httpx
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
@@ -1270,6 +1272,40 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.message.reply_text(_fmt(build_admin_home()), reply_markup=admin_main_keyboard(), **_html_kwargs())
 
 
+
+async def select_telegram_proxy(token: str) -> str | None:
+    """Return the first configured SOCKS5 proxy that can reach Telegram."""
+    configured = os.getenv("TELEGRAM_PROXY_URLS", "").strip()
+    if configured:
+        proxy_urls = [item.strip() for item in configured.replace(";", ",").split(",") if item.strip()]
+    else:
+        legacy_proxy = os.getenv("TELEGRAM_PROXY_URL", "").strip()
+        proxy_urls = [legacy_proxy] if legacy_proxy else []
+
+    if not proxy_urls:
+        logger.warning("No Telegram proxy configured; using a direct connection")
+        return None
+
+    test_url = f"https://api.telegram.org/bot{token}/getMe"
+    for index, proxy_url in enumerate(proxy_urls, start=1):
+        try:
+            async with httpx.AsyncClient(proxy=proxy_url, timeout=httpx.Timeout(12.0)) as client:
+                response = await client.get(test_url)
+                response.raise_for_status()
+                payload = response.json()
+                if payload.get("ok") is True:
+                    logger.info("Telegram proxy %s/%s is reachable; selecting it", index, len(proxy_urls))
+                    return proxy_url
+                logger.warning("Telegram proxy %s/%s returned an unexpected Telegram response", index, len(proxy_urls))
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.warning("Telegram proxy %s/%s failed connectivity check: %s", index, len(proxy_urls), type(exc).__name__)
+
+    raise RuntimeError(
+        f"None of the {len(proxy_urls)} configured Telegram proxies could reach Telegram API. "
+        "Check proxy credentials, server status, and TELEGRAM_PROXY_URLS."
+    )
+
+
 def main() -> None:
     global OWNER_ID
 
@@ -1289,7 +1325,7 @@ def main() -> None:
         if not token:
             raise RuntimeError("TELEGRAM_BOT_TOKEN در فایل .env تنظیم نشده")
         base_url = None
-        proxy_url = os.getenv("TELEGRAM_PROXY_URL")
+        proxy_url = asyncio.run(select_telegram_proxy(token))
         owner_raw = os.getenv("BOT_OWNER_ID")
         allowed_updates = Update.ALL_TYPES
 
