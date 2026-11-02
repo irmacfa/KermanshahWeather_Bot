@@ -43,6 +43,16 @@ class EventKeyboardTests(unittest.TestCase):
         self.assertIn('me:open|42', closed)
         self.assertIn('me:del|42', active)
 
+    def test_admin_attendee_page_is_clamped_after_last_attendee_removed(self):
+        attendees = [
+            {'user_id': i, 'first_name': f'User{i}', 'last_name': 'Test',
+             'username': None, 'platform': 'telegram'}
+            for i in range(1, 10)
+        ]
+        callbacks = self._callbacks(manage_attendees_keyboard(42, attendees, page=99))
+        self.assertIn('me:att|42|0', callbacks)
+        self.assertFalse(any(value == 'me:att|42|99' for value in callbacks))
+
     def test_attendee_management_callback_payloads(self):
         attendees = [
             {'user_id': 7, 'first_name': 'Ali', 'last_name': 'Test', 'username': None, 'platform': 'telegram'}
