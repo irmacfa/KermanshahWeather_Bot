@@ -32,6 +32,7 @@ from core.tracking import (
     clear_refresh,
     create_event,
     delete_event_group,
+    get_group_events,
     format_time,
     get_active_groups_data,
     get_admin_report,
@@ -304,17 +305,17 @@ async def prompt_for_name(update: Update, context: ContextTypes.DEFAULT_TYPE, pe
     )
 
 
-async def _complete_attendance(context: ContextTypes.DEFAULT_TYPE, event_id, user, name: str) -> None:
+async def _complete_attendance(context: ContextTypes.DEFAULT_TYPE, event_id, user, name: str) -> bool:
     if not event_id:
-        return
+        return False
     try:
         eid = int(event_id)
     except (TypeError, ValueError):
-        return
-    record_attendance(eid, user, name=name, platform=_platform)
+        return False
     event = get_event(eid)
-    if not event:
-        return
+    if not event or not event.get("active", 1):
+        return False
+    record_attendance(eid, user, name=name, platform=_platform)
     attendees = get_attendees(eid)
     chat_id, message_id = event.get("chat_id"), event.get("message_id")
     if chat_id and message_id:
@@ -328,6 +329,7 @@ async def _complete_attendance(context: ContextTypes.DEFAULT_TYPE, event_id, use
             )
         except Exception:
             logger.debug("Could not refresh event message after name entry", exc_info=True)
+    return True
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -355,49 +357,109 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     text = (message.text or "").strip()
 
-    if context.user_data.get("awaiting_event_title"):
-        context.user_data.pop("awaiting_event_title", None)
-        if not text:
-            context.user_data["awaiting_event_title"] = True
-            await message.reply_text("عنوان برنامه نمی‌تونه خالی باشه. دوباره بنویس:")
+    if (
+        context.user_data.get("awaiting_event_title")
+        and context.user_data.get("awaiting_event_title_chat_id") == message.chat_id
+    ):
+        if not text or len(text) < 3 or len(text) > 80 or "\\n" in text or text.startswith("/"):
+            await message.reply_text("عنوان باید یک خط و بین ۳ تا ۸۰ نویسه باشد. فقط عنوان برنامه را بفرست:")
             return
-        await _do_create_event(update, context, text)
+        context.user_data.pop("awaiting_event_title", None)
+        context.user_data.pop("awaiting_event_title_chat_id", None)
+        await _show_event_draft(update, context, text)
         return
 
-    me_action = context.user_data.pop("me_action", None)
+    me_action = context.user_data.get("me_action")
+    if me_action and me_action.get("chat_id", message.chat_id) == message.chat_id:
+        context.user_data.pop("me_action", None)
+    else:
+        me_action = None
     if me_action:
         if not await _can_manage_event(update, context):
             return
         if me_action.get("type") == "rename_event":
             eid = me_action.get("event_id")
             ev = get_event(eid)
-            if ev:
+            if not text or len(text) > 100:
+                context.user_data["me_action"] = me_action
+                await message.reply_text("عنوان باید بین ۱ تا ۱۰۰ نویسه باشد. دوباره بنویس:")
+                return
+            if not ev or ev.get("chat_id") != message.chat_id or ev.get("platform") != _platform:
+                await message.reply_text("این برنامه دیگر در دسترس نیست یا متعلق به این گروه نیست.")
+                return
+            try:
                 update_event_title(eid, text)
+            except Exception:
+                logger.exception("Could not save event title for %s", eid)
+                await message.reply_text("ذخیره عنوان برنامه انجام نشد.")
+                return
+
+            await message.reply_text("عنوان برنامه ویرایش شد.")
+            manage_id = me_action.get("manage_message_id")
+            if manage_id:
                 try:
                     attendees = get_attendees(eid)
-                    if ev.get("message_id"):
-                        await context.bot.edit_message_text(chat_id=ev["chat_id"], message_id=ev["message_id"], text=_fmt(build_event_text(get_event(eid), attendees)), reply_markup=event_keyboard(eid, len(attendees)), **_html_kwargs())
+                    updated = get_event(eid)
+                    view = (
+                        f"🛠 <b>مدیریت برنامه</b>\n\n📅 <b>{_esc(updated['title'])}</b>"
+                        f"\n👥 حاضرین: <b>{len(attendees)}</b>"
+                        f"\nوضعیت: {'فعال' if updated.get('active',1) else 'بسته'}"
+                        f"\n<code>#{eid}</code>"
+                    )
+                    await context.bot.edit_message_text(
+                        chat_id=message.chat_id,
+                        message_id=manage_id,
+                        text=_fmt(view),
+                        reply_markup=manage_event_keyboard(eid, updated.get("active", 1)),
+                        **_html_kwargs(),
+                    )
                 except Exception:
-                    pass
-            await message.reply_text("عنوان برنامه ویرایش شد.")
+                    logger.exception("Event %s was renamed but admin view could not refresh", eid)
+                    await message.reply_text("عنوان ثبت شد؛ اما صفحه مدیریت به‌روزرسانی نشد.")
             return
         if me_action.get("type") == "rename_att":
             eid = me_action.get("event_id")
             uid = me_action.get("user_id")
             page = me_action.get("page") or 0
             platform = me_action.get("platform") or _platform
+            if not _valid_full_name(text):
+                context.user_data["me_action"] = me_action
+                await message.reply_text("نام باید شامل نام و نام خانوادگی و بدون عدد یا علامت باشد. دوباره بنویس:")
+                return
+            ev = get_event(eid)
+            if not ev or ev.get("chat_id") != message.chat_id or ev.get("platform") != _platform:
+                await message.reply_text("این برنامه دیگر در دسترس نیست یا متعلق به این گروه نیست.")
+                return
             partsn = text.strip().split(None, 1)
-            fn = partsn[0] if partsn else text.strip()
+            fn = partsn[0]
             ln = partsn[1] if len(partsn) > 1 else None
-            update_attendee_name_in_group(eid, uid, fn, ln, platform=platform)
+            if not any(
+                a["user_id"] == uid and (a.get("platform") or _platform) == platform
+                for a in get_attendees(eid)
+            ):
+                await message.reply_text("این شخص دیگر در فهرست حاضرین نیست.")
+                return
             try:
-                ev = get_event(eid)
-                attendees = get_attendees(eid)
-                if ev and ev.get("message_id"):
-                    await context.bot.edit_message_text(chat_id=ev["chat_id"], message_id=ev["message_id"], text=_fmt(build_event_text(ev, attendees)), reply_markup=event_keyboard(eid, len(attendees)), **_html_kwargs())
+                update_attendee_name_in_group(eid, uid, fn, ln, platform=platform)
             except Exception:
-                pass
-            await message.reply_text("نام حضور دهنده ویرایش شد.")
+                logger.exception("Could not save attendee %s name in event %s", uid, eid)
+                await message.reply_text("ذخیره نام حاضر انجام نشد.")
+                return
+
+            await message.reply_text("نام حاضر ثبت شد.")
+            manage_id = me_action.get("manage_message_id")
+            if manage_id:
+                try:
+                    attendees = get_attendees(eid)
+                    await context.bot.edit_message_text(
+                        chat_id=message.chat_id,
+                        message_id=manage_id,
+                        text="👥 حاضرین:\n(با دکمه‌ها میشه نام ویرایش یا حذف شه)",
+                        reply_markup=manage_attendees_keyboard(eid, attendees, page),
+                    )
+                except Exception:
+                    logger.exception("Attendee %s was renamed but admin list could not refresh", uid)
+                    await message.reply_text("نام ثبت شد؛ اما فهرست مدیریت به‌روزرسانی نشد.")
             return
 
     admin_edit = context.user_data.pop("admin_edit", None)
@@ -519,7 +581,10 @@ def build_event_text(event: dict, attendees: list[dict]) -> str:
     else:
         lines.append("هنوز کسی حضور خودش رو ثبت نکرده.")
     lines.append("")
-    lines.append("🙋 اگه در این برنامه شرکت می‌کنی روی «✅ حضور» بزن؛ اسمت خودکار ثبت می‌شه.")
+    if not event.get("active", 1):
+        lines.append("🔒 <b>این برنامه بسته شده و ثبت حضور جدید امکان‌پذیر نیست.</b>")
+    else:
+        lines.append("🙋 اگه در این برنامه شرکت می‌کنی روی «✅ حضور» بزن؛ اسمت خودکار ثبت می‌شه.")
     lines.append(f"<code>#{event.get('event_id')}</code>")
     return "\n".join(lines)
 
@@ -543,7 +608,7 @@ def event_keyboard(event_id: int, attendee_count: int = 0) -> InlineKeyboardMark
             ],
             [
                 InlineKeyboardButton(
-                    f"👥 حاضرین ({attendee_count})", callback_data=f"ev:v|{event_id}"
+                    f"👥 حاضرین ({attendee_count})", callback_data=f"ev:v|{event_id}|0"
                 ),
                 InlineKeyboardButton("✏️ ثبت نام", callback_data=f"ev:n|{event_id}"),
             ],
@@ -565,13 +630,65 @@ def manage_event_keyboard(event_id: int, active: int = 1) -> InlineKeyboardMarku
     return InlineKeyboardMarkup(buttons)
 
 
+def event_attendees_keyboard(event_id: int, page: int, total: int) -> InlineKeyboardMarkup:
+    per_page = 15
+    last_page = max(0, (total - 1) // per_page)
+    page = max(0, min(page, last_page))
+    navigation = []
+    if page > 0:
+        navigation.append(
+            InlineKeyboardButton("⬅️ قبلی", callback_data=f"ev:v|{event_id}|{page - 1}")
+        )
+    if page < last_page:
+        navigation.append(
+            InlineKeyboardButton("بعدی ➡️", callback_data=f"ev:v|{event_id}|{page + 1}")
+        )
+    rows = [navigation] if navigation else []
+    rows.append([InlineKeyboardButton("🔙 بازگشت به برنامه", callback_data=f"ev:b|{event_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_event_attendees_text(event: dict, attendees: list[dict], page: int = 0) -> str:
+    per_page = 15
+    total = len(attendees)
+    last_page = max(0, (total - 1) // per_page)
+    page = max(0, min(page, last_page))
+    start = page * per_page
+    selected = attendees[start:start + per_page]
+    title = html.escape(str(event.get("title") or "برنامه"))
+    lines = [
+        f"👥 <b>حاضرین برنامه: {title}</b>",
+        f"تعداد کل: <b>{total}</b>",
+        f"صفحه {page + 1} از {last_page + 1}",
+        "",
+    ]
+    if not selected:
+        lines.append("هنوز کسی حضور خودش رو ثبت نکرده.")
+    else:
+        for index, attendee in enumerate(selected, start + 1):
+            label = _event_display_name(
+                attendee.get("first_name"),
+                attendee.get("last_name"),
+                attendee.get("username"),
+            )
+            platform = attendee.get("platform")
+            own_platform = event.get("platform")
+            tag = (
+                f" — {PLATFORM_TAG.get(platform, platform)}"
+                if platform and own_platform and platform != own_platform
+                else ""
+            )
+            lines.append(f"{index}. {html.escape(label)}{tag}")
+    return "\n".join(lines)
+
+
 def events_list_keyboard(events: list[dict]) -> InlineKeyboardMarkup:
     rows, row = [], []
     for ev in events:
         title = str(ev.get("title") or "برنامه")
         if len(title) > 40:
             title = title[:39] + "…"
-        row.append(InlineKeyboardButton(title, callback_data=f"ev:v|{ev['event_id']}"))
+        row.append(InlineKeyboardButton(title, callback_data=f"ev:s|{ev['event_id']}"))
         if len(row) == 2:
             rows.append(row)
             row = []
@@ -614,9 +731,85 @@ async def _can_manage_event(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     return False
 
 
+def event_draft_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ تأیید و انتشار", callback_data="ec:p")],
+        [InlineKeyboardButton("✏️ ویرایش عنوان", callback_data="ec:e"),
+         InlineKeyboardButton("لغو", callback_data="ec:x")],
+    ])
+
+
+async def _show_event_draft(update: Update, context: ContextTypes.DEFAULT_TYPE, title: str) -> None:
+    message = update.message or update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if message is None or chat is None or user is None:
+        return
+    context.user_data["event_draft"] = {
+        "title": title.strip(),
+        "chat_id": chat.id,
+        "user_id": user.id,
+        "platform": _platform,
+    }
+    preview = (
+        "📋 <b>پیش‌نمایش ایونت</b>\n\n"
+        f"عنوان: <b>{html.escape(title.strip())}</b>\n\n"
+        "این ایونت هنوز منتشر نشده است. اطلاعات را بررسی کن؛ "
+        "برای انتشار باید دکمه تأیید را بزنی."
+    )
+    await message.chat.send_message(
+        _fmt(preview), reply_markup=event_draft_keyboard(), **_html_kwargs()
+    )
+
+
+async def event_draft_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None or query.message is None:
+        return
+    draft = context.user_data.get("event_draft")
+    if not draft:
+        await query.answer("پیش‌نویس پیدا نشد؛ دوباره ایونت بساز.", show_alert=True)
+        return
+    if (
+        draft.get("chat_id") != query.message.chat.id
+        or draft.get("user_id") != query.from_user.id
+        or draft.get("platform") != _platform
+    ):
+        await query.answer("این پیش‌نویس متعلق به شما یا این گروه نیست.", show_alert=True)
+        return
+    if not await _can_manage_event(update, context):
+        await query.answer("فقط ادمین می‌تواند ایونت را منتشر کند.", show_alert=True)
+        return
+
+    action = query.data.split(":", 1)[1]
+    if action == "e":
+        context.user_data["awaiting_event_title"] = True
+        context.user_data["awaiting_event_title_chat_id"] = query.message.chat.id
+        context.user_data.pop("event_draft", None)
+        await query.answer()
+        await query.edit_message_text("✏️ عنوان جدید ایونت را در یک پیام بفرست (۳ تا ۸۰ نویسه):")
+        return
+    if action == "x":
+        context.user_data.pop("event_draft", None)
+        await query.answer("پیش‌نویس لغو شد.")
+        await query.edit_message_text("ایجاد ایونت لغو شد؛ چیزی در گروه منتشر نشد.")
+        return
+    if action != "p":
+        await query.answer("عملیات نامعتبر است.", show_alert=True)
+        return
+
+    title = draft["title"]
+    context.user_data.pop("event_draft", None)
+    await query.answer("در حال انتشار…")
+    await query.edit_message_text("✅ تأیید شد؛ ایونت در حال انتشار است.")
+    await _do_create_event(update, context, title)
+
+
 async def _do_create_event(update: Update, context: ContextTypes.DEFAULT_TYPE, title: str) -> None:
     message = update.message or update.effective_message
     chat_id = update.effective_chat.id
+    context.user_data.pop("awaiting_event_title", None)
+    context.user_data.pop("awaiting_event_title_chat_id", None)
     event_id = create_event(title, chat_id, update.effective_user.id, _platform)
     sent = await context.bot.send_message(
         chat_id=chat_id,
@@ -663,8 +856,13 @@ async def event_create_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     if not await _can_manage_event(update, context):
         await message.reply_text("فقط ادمین می‌تونه برنامه بسازه.")
         return
+    title = (title or "").strip()
+    if title and (len(title) < 3 or len(title) > 80 or "\\n" in title or title.startswith("/")):
+        await message.reply_text("عنوان باید یک خط و بین ۳ تا ۸۰ نویسه باشد.")
+        return
     if not title:
         context.user_data["awaiting_event_title"] = True
+        context.user_data["awaiting_event_title_chat_id"] = message.chat_id
         if update.effective_chat.type in ("group", "supergroup"):
             _remember_flow_message(context, message.chat_id, message.message_id, key="event_flow_msgs")
         prompt = await message.chat.send_message(
@@ -672,7 +870,7 @@ async def event_create_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         )
         _remember_flow_message(context, prompt.chat_id, prompt.message_id, key="event_flow_msgs")
         return
-    await _do_create_event(update, context, title)
+    await _show_event_draft(update, context, title)
 
 
 async def event_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -720,17 +918,31 @@ async def process_event_refreshes(context: ContextTypes.DEFAULT_TYPE) -> None:
                 chat_id=event["chat_id"],
                 message_id=event["message_id"],
                 text=_fmt(build_event_text(event, attendees)),
-                reply_markup=event_keyboard(event["event_id"], len(attendees)),
+                reply_markup=(
+                    event_keyboard(event["event_id"], len(attendees))
+                    if event.get("active", 1)
+                    else None
+                ),
                 **_html_kwargs(),
             )
         except Exception:
-            logger.debug("Refresh failed for event %s", event["event_id"], exc_info=True)
-        clear_refresh(event["event_id"])
+            # Keep the item queued so transient Telegram/API failures can be retried.
+            logger.warning(
+                "Refresh failed for event %s; it will be retried",
+                event["event_id"],
+                exc_info=True,
+            )
+        else:
+            clear_refresh(event["event_id"])
 
 
 async def event_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     kind, _, arg = query.data[len("ev:"):].partition("|")
+
+    if query.message is None:
+        await query.answer("این دکمه دیگر معتبر نیست.", show_alert=True)
+        return
 
     if kind == "l":
         await query.answer()
@@ -743,18 +955,63 @@ async def event_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
+    parts = arg.split("|") if arg else []
     try:
-        event_id = int(arg)
+        event_id = int(parts[0])
+        page = int(parts[1]) if len(parts) > 1 else 0
     except (TypeError, ValueError):
-        await query.answer()
+        await query.answer("شناسه برنامه معتبر نیست.", show_alert=True)
         return
 
     event = get_event(event_id)
     if event is None:
-        await query.answer("این برنامه پیدا نشد.", show_alert=True)
+        await query.answer("این برنامه حذف شده یا دیگر در دسترس نیست.", show_alert=True)
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            logger.debug("Could not clear stale event keyboard", exc_info=True)
+        return
+    if event.get("chat_id") != query.message.chat.id or event.get("platform") != _platform:
+        await query.answer("این دکمه متعلق به این گروه نیست.", show_alert=True)
         return
     if not event.get("active", 1):
         await query.answer("این برنامه بسته شده.", show_alert=True)
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            logger.debug("Could not clear closed event keyboard", exc_info=True)
+        return
+
+    if kind == "s":
+        await query.answer()
+        attendees = get_attendees(event_id)
+        await query.edit_message_text(
+            _fmt(build_event_text(event, attendees)),
+            reply_markup=event_keyboard(event_id, len(attendees)),
+            **_html_kwargs(),
+        )
+        return
+
+    if kind == "v":
+        attendees = get_attendees(event_id)
+        page_size = 15
+        page = max(0, min(page, max(0, (len(attendees) - 1) // page_size)))
+        await query.answer()
+        await query.edit_message_text(
+            _fmt(build_event_attendees_text(event, attendees, page)),
+            reply_markup=event_attendees_keyboard(event_id, page, len(attendees)),
+            **_html_kwargs(),
+        )
+        return
+
+    if kind == "b":
+        await query.answer()
+        attendees = get_attendees(event_id)
+        await query.edit_message_text(
+            _fmt(build_event_text(event, attendees)),
+            reply_markup=event_keyboard(event_id, len(attendees)),
+            **_html_kwargs(),
+        )
         return
 
     if kind == "a" and get_profile(query.from_user.id, _platform) is None:
@@ -1356,6 +1613,7 @@ def main() -> None:
     app.add_handler(CommandHandler("admin", admin_command))
     app.add_handler(CallbackQueryHandler(admin_callback, pattern=r"^ad:"))
     app.add_handler(CallbackQueryHandler(name_confirm_callback, pattern=r"^nc:"))
+    app.add_handler(CallbackQueryHandler(event_draft_callback, pattern=r"^ec:"))
     app.add_handler(CallbackQueryHandler(event_callback, pattern=r"^ev:"))
     app.add_handler(CallbackQueryHandler(manage_event_callback, pattern=r"^me:"))
     app.add_handler(CallbackQueryHandler(handle_site_callback))
@@ -1585,11 +1843,26 @@ def admin_unreg_keyboard(users: list, page: int = 0) -> InlineKeyboardMarkup:
 
 
 def build_unreg_page(page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
-    users = []
+    # Keep the current group as the default, but allow configuration per deployment.
+    raw_chat_id = os.getenv("UNREGISTERED_USERS_CHAT_ID", "-1002297819434").strip()
     try:
-        users = get_group_users_unregistered(-1002297819434, _platform)
+        chat_id = int(raw_chat_id)
+    except ValueError:
+        logger.error("UNREGISTERED_USERS_CHAT_ID must be an integer")
+        return (
+            "⚠️ شناسه گروه ثبت‌نام‌نشده‌ها در تنظیمات معتبر نیست.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("🏠 خانه", callback_data="ad:main")]]),
+        )
+
+    try:
+        users = get_group_users_unregistered(chat_id, _platform)
     except Exception:
-        pass
+        logger.exception("Could not load unregistered users for chat %s", chat_id)
+        return (
+            "⚠️ دریافت فهرست کاربران ثبت‌نام‌نشده با خطا مواجه شد.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("🏠 خانه", callback_data="ad:main")]]),
+        )
+
     if not users:
         return "👥 <b>ثبت‌نام نشده‌های گروه</b>\n\nهمهٔ اعضای فعال ثبت‌نام شده‌اند.", InlineKeyboardMarkup([[InlineKeyboardButton("🏠 خانه", callback_data="ad:main")]])
     return f"👥 <b>ثبت‌نام نشده‌های گروه</b> ({len(users)})\n\nبا کلیک روی هر نفر میشه اسمش رو ثبت کنی:", admin_unreg_keyboard(users, page)
@@ -1729,6 +2002,8 @@ def build_hours_editor() -> tuple[str, InlineKeyboardMarkup]:
 
 def manage_attendees_keyboard(event_id: int, attendees: list[dict], page: int = 0) -> InlineKeyboardMarkup:
     per_page = 8
+    last_page = max(0, (len(attendees) - 1) // per_page)
+    page = max(0, min(page, last_page))
     start = page * per_page
     slice_ = attendees[start : start + per_page]
     buttons = []
@@ -1755,6 +2030,9 @@ def manage_attendees_keyboard(event_id: int, attendees: list[dict], page: int = 
 
 async def manage_event_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
+    if query.message is None:
+        await query.answer("این دکمه دیگر معتبر نیست.", show_alert=True)
+        return
     if query.message.chat.type in ("group", "supergroup"):
         if not await _can_manage_event(update, context):
             await query.answer("فقط ادمین می‌تونه مدیریت کنه.", show_alert=True)
@@ -1783,7 +2061,17 @@ async def manage_event_callback(update: Update, context: ContextTypes.DEFAULT_TY
     event_id = int(parts[0]) if parts and parts[0].isdigit() else None
     event = get_event(event_id) if event_id else None
     if event is None and kind not in ("list",):
-        await query.answer("برنامه پیدا نشد.", show_alert=True)
+        await query.answer("این برنامه حذف شده یا دیگر در دسترس نیست.", show_alert=True)
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            logger.debug("Could not clear stale management keyboard", exc_info=True)
+        return
+    if event is not None and (
+        event.get("chat_id") != query.message.chat.id
+        or event.get("platform") != _platform
+    ):
+        await query.answer("این برنامه متعلق به این گروه نیست.", show_alert=True)
         return
 
     if kind == "view":
@@ -1805,38 +2093,48 @@ async def manage_event_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
     if kind == "ren":
         await query.answer()
-        context.user_data["me_action"] = {"type": "rename_event", "event_id": event_id}
-        await query.message.reply_text("✏️ عنوان جدید برنامه رو بنویس:")
+        context.user_data["me_action"] = {
+            "type": "rename_event",
+            "event_id": event_id,
+            "chat_id": query.message.chat.id,
+            "manage_message_id": query.message.message_id,
+        }
+        await query.message.reply_text("✏️ عنوان جدید برنامه رو بنویس (حداکثر ۱۰۰ نویسه):")
         return
 
     if kind == "close":
         await query.answer()
         set_event_active(event_id, False)
-        try:
-            await context.bot.edit_message_reply_markup(chat_id=event["chat_id"], message_id=event["message_id"], reply_markup=None)
-        except Exception:
-            pass
         await query.edit_message_text(f"🔒 برنامه بسته شد.\n\n<code>#{event_id}</code>", reply_markup=manage_event_keyboard(event_id, 0))
         return
 
     if kind == "open":
         await query.answer()
         set_event_active(event_id, True)
-        try:
-            attendees = get_attendees(event_id)
-            await context.bot.edit_message_text(chat_id=event["chat_id"], message_id=event["message_id"], text=_fmt(build_event_text(event, attendees)), reply_markup=event_keyboard(event_id, len(attendees)), **_html_kwargs())
-        except Exception:
-            pass
         await query.edit_message_text(f"برنامه باز شد.\n\n<code>#{event_id}</code>", reply_markup=manage_event_keyboard(event_id, 1))
         return
 
     if kind == "del":
         await query.answer("در حال حذف...", show_alert=False)
+        linked_events = get_group_events(event_id)
         delete_event_group(event_id)
-        try:
-            await context.bot.delete_message(chat_id=event["chat_id"], message_id=event["message_id"])
-        except Exception:
-            pass
+        # Remove every linked post managed by this bot instance. Posts on the
+        # other platform are left harmless: their callbacks detect the missing event.
+        for linked in linked_events:
+            if linked.get("platform") != _platform or not linked.get("message_id"):
+                continue
+            try:
+                await context.bot.delete_message(
+                    chat_id=linked["chat_id"],
+                    message_id=linked["message_id"],
+                )
+            except Exception:
+                logger.warning(
+                    "Could not delete linked event message %s in chat %s",
+                    linked.get("message_id"),
+                    linked.get("chat_id"),
+                    exc_info=True,
+                )
         events = get_all_events_for_chat(query.message.chat.id, _platform)
         if not events:
             await query.edit_message_text("برنامه حذف شد. هیچ برنامه دیگری نیست.")
@@ -1845,33 +2143,45 @@ async def manage_event_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     if kind == "an":
-        await query.answer()
         user_id = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
         page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
         platform = parts[3] if len(parts) > 3 and parts[3] else _platform
-        context.user_data["me_action"] = {"type": "rename_att", "event_id": event_id, "user_id": user_id, "page": page, "platform": platform}
+        attendees = get_attendees(event_id)
+        if not any(a["user_id"] == user_id and (a.get("platform") or _platform) == platform for a in attendees):
+            await query.answer("این کاربر در فهرست حاضرین این برنامه نیست.", show_alert=True)
+            return
+        await query.answer()
+        context.user_data["me_action"] = {
+            "type": "rename_att",
+            "event_id": event_id,
+            "user_id": user_id,
+            "page": page,
+            "platform": platform,
+            "chat_id": query.message.chat.id,
+            "manage_message_id": query.message.message_id,
+        }
         await query.message.reply_text("✏️ نام و نام خانوادگی جدید رو بنویس (مثال: علی رضایی):")
         return
 
     if kind == "ar":
-        await query.answer()
         user_id = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
         page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
         platform = parts[3] if len(parts) > 3 and parts[3] else _platform
+        attendees_before = get_attendees(event_id)
+        if not any(a["user_id"] == user_id and (a.get("platform") or _platform) == platform for a in attendees_before):
+            await query.answer("این کاربر در فهرست حاضرین این برنامه نیست.", show_alert=True)
+            return
+        await query.answer()
         remove_attendee_from_group(event_id, user_id, platform=platform)
-        try:
-            attendees = get_attendees(event_id)
-            ev = get_event(event_id)
-            if ev and ev.get("message_id"):
-                await context.bot.edit_message_text(chat_id=ev["chat_id"], message_id=ev["message_id"], text=_fmt(build_event_text(ev, attendees)), reply_markup=event_keyboard(event_id, len(attendees)), **_html_kwargs())
-        except Exception:
-            pass
+        # The refresh queue updates every linked event post on its own platform.
         attendees = get_attendees(event_id)
         if not attendees:
             await query.edit_message_text("حضور آن نفر حذف شد.\n\nهیچ کسی ثبت‌نام نکرده.", reply_markup=manage_event_keyboard(event_id, event.get("active",1)))
             return
         await query.edit_message_text("حضور آن نفر حذف شد.", reply_markup=manage_attendees_keyboard(event_id, attendees, page))
         return
+
+    await query.answer("عملیات مدیریت شناخته نشد.", show_alert=True)
 
 
 async def name_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1901,7 +2211,11 @@ async def name_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TY
         elif action == "events":
             await show_events(update, context)
         elif action == "attend" and name and user:
-            await _complete_attendance(context, pending.get("event_id"), user, name)
+            completed = await _complete_attendance(context, pending.get("event_id"), user, name)
+            if not completed and query.message:
+                await query.message.reply_text(
+                    "نام شما ثبت شد، اما این برنامه در این فاصله بسته یا حذف شده و حضور ثبت نشد."
+                )
         return
     await query.answer()
 
