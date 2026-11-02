@@ -305,17 +305,17 @@ async def prompt_for_name(update: Update, context: ContextTypes.DEFAULT_TYPE, pe
     )
 
 
-async def _complete_attendance(context: ContextTypes.DEFAULT_TYPE, event_id, user, name: str) -> None:
+async def _complete_attendance(context: ContextTypes.DEFAULT_TYPE, event_id, user, name: str) -> bool:
     if not event_id:
-        return
+        return False
     try:
         eid = int(event_id)
     except (TypeError, ValueError):
-        return
-    record_attendance(eid, user, name=name, platform=_platform)
+        return False
     event = get_event(eid)
-    if not event:
-        return
+    if not event or not event.get("active", 1):
+        return False
+    record_attendance(eid, user, name=name, platform=_platform)
     attendees = get_attendees(eid)
     chat_id, message_id = event.get("chat_id"), event.get("message_id")
     if chat_id and message_id:
@@ -329,6 +329,7 @@ async def _complete_attendance(context: ContextTypes.DEFAULT_TYPE, event_id, use
             )
         except Exception:
             logger.debug("Could not refresh event message after name entry", exc_info=True)
+    return True
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -356,8 +357,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     text = (message.text or "").strip()
 
-    if context.user_data.get("awaiting_event_title"):
+    if (
+        context.user_data.get("awaiting_event_title")
+        and context.user_data.get("awaiting_event_title_chat_id", message.chat_id) == message.chat_id
+    ):
         context.user_data.pop("awaiting_event_title", None)
+        context.user_data.pop("awaiting_event_title_chat_id", None)
         if not text:
             context.user_data["awaiting_event_title"] = True
             await message.reply_text("عنوان برنامه نمی‌تونه خالی باشه. دوباره بنویس:")
@@ -712,6 +717,8 @@ async def _can_manage_event(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def _do_create_event(update: Update, context: ContextTypes.DEFAULT_TYPE, title: str) -> None:
     message = update.message or update.effective_message
     chat_id = update.effective_chat.id
+    context.user_data.pop("awaiting_event_title", None)
+    context.user_data.pop("awaiting_event_title_chat_id", None)
     event_id = create_event(title, chat_id, update.effective_user.id, _platform)
     sent = await context.bot.send_message(
         chat_id=chat_id,
@@ -760,6 +767,7 @@ async def event_create_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         return
     if not title:
         context.user_data["awaiting_event_title"] = True
+        context.user_data["awaiting_event_title_chat_id"] = message.chat_id
         if update.effective_chat.type in ("group", "supergroup"):
             _remember_flow_message(context, message.chat_id, message.message_id, key="event_flow_msgs")
         prompt = await message.chat.send_message(
@@ -2055,13 +2063,7 @@ async def manage_event_callback(update: Update, context: ContextTypes.DEFAULT_TY
         page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
         platform = parts[3] if len(parts) > 3 and parts[3] else _platform
         remove_attendee_from_group(event_id, user_id, platform=platform)
-        try:
-            attendees = get_attendees(event_id)
-            ev = get_event(event_id)
-            if ev and ev.get("message_id"):
-                await context.bot.edit_message_text(chat_id=ev["chat_id"], message_id=ev["message_id"], text=_fmt(build_event_text(ev, attendees)), reply_markup=event_keyboard(event_id, len(attendees)), **_html_kwargs())
-        except Exception:
-            pass
+        # The refresh queue updates every linked event post on its own platform.
         attendees = get_attendees(event_id)
         if not attendees:
             await query.edit_message_text("حضور آن نفر حذف شد.\n\nهیچ کسی ثبت‌نام نکرده.", reply_markup=manage_event_keyboard(event_id, event.get("active",1)))
@@ -2097,7 +2099,11 @@ async def name_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TY
         elif action == "events":
             await show_events(update, context)
         elif action == "attend" and name and user:
-            await _complete_attendance(context, pending.get("event_id"), user, name)
+            completed = await _complete_attendance(context, pending.get("event_id"), user, name)
+            if not completed and query.message:
+                await query.message.reply_text(
+                    "نام شما ثبت شد، اما این برنامه در این فاصله بسته یا حذف شده و حضور ثبت نشد."
+                )
         return
     await query.answer()
 
