@@ -13,7 +13,7 @@ class JalaliConversionTests(unittest.TestCase):
         self.assertEqual(to_jalali(2025, 3, 20), (1403, 12, 30))
 
     def test_nowruz_1404(self):
-        self.assertEqual(format_jalali_date(2025, 3, 21), "۱۴۰۴/۱/۱")
+        self.assertEqual(format_jalali_date(1404, 1, 1), "۱۴۰۴/۱/۱")
 
 
 if __name__ == "__main__":
