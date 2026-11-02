@@ -390,9 +390,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 return
             try:
                 update_event_title(eid, text)
-                await message.reply_text("عنوان برنامه ویرایش شد.")
-                manage_id = me_action.get("manage_message_id")
-                if manage_id:
+            except Exception:
+                logger.exception("Could not save event title for %s", eid)
+                await message.reply_text("ذخیره عنوان برنامه انجام نشد.")
+                return
+
+            await message.reply_text("عنوان برنامه ویرایش شد.")
+            manage_id = me_action.get("manage_message_id")
+            if manage_id:
+                try:
                     attendees = get_attendees(eid)
                     updated = get_event(eid)
                     view = (
@@ -408,9 +414,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                         reply_markup=manage_event_keyboard(eid, updated.get("active", 1)),
                         **_html_kwargs(),
                     )
-            except Exception:
-                logger.exception("Could not rename event %s", eid)
-                await message.reply_text("ویرایش عنوان انجام نشد؛ خطا در ثبت یا به‌روزرسانی پیام.")
+                except Exception:
+                    logger.exception("Event %s was renamed but admin view could not refresh", eid)
+                    await message.reply_text("عنوان ثبت شد؛ اما صفحه مدیریت به‌روزرسانی نشد.")
             return
         if me_action.get("type") == "rename_att":
             eid = me_action.get("event_id")
@@ -428,11 +434,23 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             partsn = text.strip().split(None, 1)
             fn = partsn[0]
             ln = partsn[1] if len(partsn) > 1 else None
+            if not any(
+                a["user_id"] == uid and (a.get("platform") or _platform) == platform
+                for a in get_attendees(eid)
+            ):
+                await message.reply_text("این شخص دیگر در فهرست حاضرین نیست.")
+                return
             try:
                 update_attendee_name_in_group(eid, uid, fn, ln, platform=platform)
-                await message.reply_text("نام حاضر ثبت شد.")
-                manage_id = me_action.get("manage_message_id")
-                if manage_id:
+            except Exception:
+                logger.exception("Could not save attendee %s name in event %s", uid, eid)
+                await message.reply_text("ذخیره نام حاضر انجام نشد.")
+                return
+
+            await message.reply_text("نام حاضر ثبت شد.")
+            manage_id = me_action.get("manage_message_id")
+            if manage_id:
+                try:
                     attendees = get_attendees(eid)
                     await context.bot.edit_message_text(
                         chat_id=message.chat_id,
@@ -440,9 +458,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                         text="👥 حاضرین:\n(با دکمه‌ها میشه نام ویرایش یا حذف شه)",
                         reply_markup=manage_attendees_keyboard(eid, attendees, page),
                     )
-            except Exception:
-                logger.exception("Could not rename attendee %s in event %s", uid, eid)
-                await message.reply_text("ویرایش نام حاضر انجام نشد.")
+                except Exception:
+                    logger.exception("Attendee %s was renamed but admin list could not refresh", uid)
+                    await message.reply_text("نام ثبت شد؛ اما فهرست مدیریت به‌روزرسانی نشد.")
             return
 
     admin_edit = context.user_data.pop("admin_edit", None)
