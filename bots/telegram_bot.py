@@ -375,8 +375,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     else:
         me_action = None
     if me_action:
-        if not await _can_manage_event(update, context):
+        if me_action.get("admin_panel"):
+            if OWNER_ID is None or user.id != OWNER_ID or message.chat.type != "private":
+                return
+        elif not await _can_manage_event(update, context):
             return
+        target_chat_id = me_action.get("target_chat_id", message.chat_id)
         if me_action.get("type") == "rename_event":
             eid = me_action.get("event_id")
             ev = get_event(eid)
@@ -384,7 +388,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 context.user_data["me_action"] = me_action
                 await message.reply_text("عنوان باید بین ۱ تا ۱۰۰ نویسه باشد. دوباره بنویس:")
                 return
-            if not ev or ev.get("chat_id") != message.chat_id or ev.get("platform") != _platform:
+            if not ev or ev.get("chat_id") != target_chat_id or ev.get("platform") != _platform:
                 await message.reply_text("این برنامه دیگر در دسترس نیست یا متعلق به این گروه نیست.")
                 return
             try:
@@ -410,7 +414,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                         chat_id=message.chat_id,
                         message_id=manage_id,
                         text=_fmt(view),
-                        reply_markup=manage_event_keyboard(eid, updated.get("active", 1)),
+                        reply_markup=(
+                            admin_manage_event_keyboard(eid, target_chat_id, updated.get("active", 1))
+                            if me_action.get("admin_panel")
+                            else manage_event_keyboard(eid, updated.get("active", 1))
+                        ),
                         **_html_kwargs(),
                     )
                 except Exception:
@@ -427,7 +435,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 await message.reply_text("نام باید شامل نام و نام خانوادگی و بدون عدد یا علامت باشد. دوباره بنویس:")
                 return
             ev = get_event(eid)
-            if not ev or ev.get("chat_id") != message.chat_id or ev.get("platform") != _platform:
+            if not ev or ev.get("chat_id") != target_chat_id or ev.get("platform") != _platform:
                 await message.reply_text("این برنامه دیگر در دسترس نیست یا متعلق به این گروه نیست.")
                 return
             partsn = text.strip().split(None, 1)
@@ -455,7 +463,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                         chat_id=message.chat_id,
                         message_id=manage_id,
                         text="👥 حاضرین:\n(با دکمه‌ها میشه نام ویرایش یا حذف شه)",
-                        reply_markup=manage_attendees_keyboard(eid, attendees, page),
+                        reply_markup=(
+                            admin_manage_attendees_keyboard(eid, target_chat_id, attendees, page)
+                            if me_action.get("admin_panel")
+                            else manage_attendees_keyboard(eid, attendees, page)
+                        ),
                     )
                 except Exception:
                     logger.exception("Attendee %s was renamed but admin list could not refresh", uid)
@@ -1485,6 +1497,9 @@ def admin_main_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("👥 گروه‌ها", callback_data="ad:groups"),
             ],
             [
+                InlineKeyboardButton("📅 مدیریت ایونت‌ها", callback_data="ad:evgroups"),
+            ],
+            [
                 InlineKeyboardButton("👤 حضور ثبت‌شده‌ها", callback_data="ad:users|0"),
                 InlineKeyboardButton("🧑‍💼 ثبت‌نام نشده‌ها", callback_data="ad:unreg|0"),
             ],
@@ -1616,6 +1631,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(event_draft_callback, pattern=r"^ec:"))
     app.add_handler(CallbackQueryHandler(event_callback, pattern=r"^ev:"))
     app.add_handler(CallbackQueryHandler(manage_event_callback, pattern=r"^me:"))
+    app.add_handler(CallbackQueryHandler(admin_manage_event_callback, pattern=r"^ma:"))
     app.add_handler(CallbackQueryHandler(handle_site_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_error_handler(error_handler)
@@ -1716,6 +1732,20 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if kind == "groups":
         text, keyboard = build_groups_text()
+        await query.edit_message_text(_fmt(text), reply_markup=keyboard, **_html_kwargs())
+        return
+
+    if kind == "evgroups":
+        text, keyboard = build_admin_event_groups_page()
+        await query.edit_message_text(_fmt(text), reply_markup=keyboard, **_html_kwargs())
+        return
+
+    if kind == "evgroup":
+        group_id = int(arg) if arg.lstrip("-").isdigit() else None
+        if group_id is None:
+            await query.edit_message_text("شناسه گروه معتبر نیست.")
+            return
+        text, keyboard = build_admin_group_events_page(group_id)
         await query.edit_message_text(_fmt(text), reply_markup=keyboard, **_html_kwargs())
         return
 
@@ -2031,6 +2061,260 @@ def manage_attendees_keyboard(event_id: int, attendees: list[dict], page: int = 
         buttons.append(nav)
     buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data=f"me:view|{event_id}")])
     return InlineKeyboardMarkup(buttons)
+
+
+def admin_manage_events_keyboard(events: list[dict], group_id: int) -> InlineKeyboardMarkup:
+    rows = []
+    for event in events:
+        title = str(event.get("title") or "برنامه")[:36]
+        status = "" if event.get("active", 1) else " [بسته]"
+        rows.append([InlineKeyboardButton(
+            f"#{event['event_id']} {title}{status}",
+            callback_data=f"ma:{group_id}|view|{event['event_id']}",
+        )])
+    rows.append([InlineKeyboardButton("🔙 انتخاب گروه", callback_data="ad:evgroups")])
+    return InlineKeyboardMarkup(rows)
+
+
+def admin_manage_event_keyboard(event_id: int, group_id: int, active: int = 1) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton("👥 مدیریت حاضرین", callback_data=f"ma:{group_id}|att|{event_id}|0")],
+        [InlineKeyboardButton("✏️ ویرایش عنوان", callback_data=f"ma:{group_id}|ren|{event_id}")],
+    ]
+    if active:
+        rows.append([InlineKeyboardButton("🔒 بستن برنامه", callback_data=f"ma:{group_id}|close|{event_id}")])
+    else:
+        rows.append([InlineKeyboardButton("🔓 باز کردن برنامه", callback_data=f"ma:{group_id}|open|{event_id}")])
+    rows.extend([
+        [InlineKeyboardButton("🗑 حذف برنامه", callback_data=f"ma:{group_id}|del|{event_id}")],
+        [InlineKeyboardButton("🔙 فهرست ایونت‌های گروه", callback_data=f"ad:evgroup|{group_id}")],
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def admin_manage_attendees_keyboard(
+    event_id: int, group_id: int, attendees: list[dict], page: int = 0
+) -> InlineKeyboardMarkup:
+    per_page = 8
+    last_page = max(0, (len(attendees) - 1) // per_page)
+    page = max(0, min(page, last_page))
+    start = page * per_page
+    rows = []
+    for attendee in attendees[start:start + per_page]:
+        label = _event_display_name(
+            attendee.get("first_name"), attendee.get("last_name"), attendee.get("username")
+        )
+        platform = attendee.get("platform") or _platform
+        rows.append([
+            InlineKeyboardButton(label[:28], callback_data="ma:noop"),
+            InlineKeyboardButton("✏️ نام", callback_data=f"ma:{group_id}|an|{event_id}|{attendee['user_id']}|{page}|{platform}"),
+            InlineKeyboardButton("❌ حذف", callback_data=f"ma:{group_id}|ar|{event_id}|{attendee['user_id']}|{page}|{platform}"),
+        ])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️ قبلی", callback_data=f"ma:{group_id}|att|{event_id}|{page-1}"))
+    if start + per_page < len(attendees):
+        nav.append(InlineKeyboardButton("بعدی ➡️", callback_data=f"ma:{group_id}|att|{event_id}|{page+1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data=f"ma:{group_id}|view|{event_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_admin_event_groups_page() -> tuple[str, InlineKeyboardMarkup]:
+    groups = get_active_groups_data()
+    if not groups:
+        return (
+            "📅 <b>مدیریت ایونت‌ها</b>\n\nگروه فعالی برای انتخاب وجود ندارد.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("🏠 خانه", callback_data="ad:main")]]),
+        )
+    rows = []
+    lines = [f"📅 <b>انتخاب گروه برای مدیریت ایونت‌ها</b> ({len(groups)})", ""]
+    for chat_id, title, added_by, last_seen in groups:
+        label = str(title or chat_id)
+        rows.append([InlineKeyboardButton(
+            f"👥 {label[:42]}",
+            callback_data=f"ad:evgroup|{chat_id}",
+        )])
+    rows.append([InlineKeyboardButton("🏠 خانه", callback_data="ad:main")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def build_admin_group_events_page(group_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    groups = {int(row[0]): row[1] for row in get_active_groups_data()}
+    group_title = groups.get(group_id)
+    if group_title is None:
+        return (
+            "⚠️ این گروه در فهرست گروه‌های فعال نیست.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("🔙 انتخاب گروه", callback_data="ad:evgroups")]]),
+        )
+    events = get_all_events_for_chat(group_id, _platform)
+    if not events:
+        return (
+            f"📅 <b>ایونت‌های گروه {_esc(group_title)}</b>\n\nهنوز ایونتی در این گروه ثبت نشده.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("🔙 انتخاب گروه", callback_data="ad:evgroups")]]),
+        )
+    text = f"📅 <b>ایونت‌های گروه {_esc(group_title)}</b>\n\nبرای مدیریت، ایونت را انتخاب کن:"
+    return text, admin_manage_events_keyboard(events, group_id)
+
+
+async def admin_manage_event_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None or query.message is None:
+        if query:
+            await query.answer("این دکمه دیگر معتبر نیست.", show_alert=True)
+        return
+    if OWNER_ID is None or query.from_user.id != OWNER_ID or query.message.chat.type != "private":
+        await query.answer("این بخش فقط در پنل خصوصی مالک ربات در دسترس است.", show_alert=True)
+        return
+
+    if query.data == "ma:noop":
+        await query.answer()
+        return
+
+    payload = query.data[len("ma:"):]
+    try:
+        group_raw, action, *parts = payload.split("|")
+        group_id = int(group_raw)
+    except (ValueError, TypeError):
+        await query.answer("اطلاعات دکمه معتبر نیست.", show_alert=True)
+        return
+
+    if action == "list":
+        text, keyboard = build_admin_group_events_page(group_id)
+        await query.answer()
+        await query.edit_message_text(_fmt(text), reply_markup=keyboard, **_html_kwargs())
+        return
+
+    event_id = int(parts[0]) if parts and parts[0].isdigit() else None
+    event = get_event(event_id) if event_id else None
+    if event is None or event.get("chat_id") != group_id or event.get("platform") != _platform:
+        await query.answer("این ایونت حذف شده یا متعلق به گروه انتخاب‌شده نیست.", show_alert=True)
+        return
+
+    if action == "view":
+        attendees = get_attendees(event_id)
+        text = (
+            f"🛠 <b>مدیریت ایونت</b>\n\n📅 <b>{_esc(event.get('title'))}</b>"
+            f"\n👥 حاضرین: <b>{len(attendees)}</b>"
+            f"\nوضعیت: {'فعال' if event.get('active', 1) else 'بسته'}"
+            f"\n<code>#{event_id}</code>"
+        )
+        await query.answer()
+        await query.edit_message_text(
+            _fmt(text),
+            reply_markup=admin_manage_event_keyboard(event_id, group_id, event.get("active", 1)),
+            **_html_kwargs(),
+        )
+        return
+
+    if action == "att":
+        page = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+        attendees = get_attendees(event_id)
+        await query.answer()
+        if not attendees:
+            await query.edit_message_text(
+                "هنوز کسی ثبت‌نام نکرده.",
+                reply_markup=admin_manage_event_keyboard(event_id, group_id, event.get("active", 1)),
+            )
+            return
+        await query.edit_message_text(
+            "👥 حاضرین:\n(برای ویرایش نام یا حذف فرد از دکمه‌های کناری استفاده کن)",
+            reply_markup=admin_manage_attendees_keyboard(event_id, group_id, attendees, page),
+        )
+        return
+
+    if action == "ren":
+        context.user_data["me_action"] = {
+            "type": "rename_event",
+            "event_id": event_id,
+            "chat_id": query.message.chat.id,
+            "target_chat_id": group_id,
+            "admin_panel": True,
+            "manage_message_id": query.message.message_id,
+        }
+        await query.answer()
+        await query.message.reply_text("✏️ عنوان جدید ایونت را بفرست (حداکثر ۱۰۰ نویسه):")
+        return
+
+    if action in ("close", "open"):
+        active = action == "open"
+        set_event_active(event_id, active)
+        await query.answer("وضعیت ایونت به‌روزرسانی شد.")
+        await query.edit_message_text(
+            f"{'🔓 ایونت باز شد.' if active else '🔒 ایونت بسته شد.'}\n\n<code>#{event_id}</code>",
+            reply_markup=admin_manage_event_keyboard(event_id, group_id, int(active)),
+            **_html_kwargs(),
+        )
+        return
+
+    if action == "del":
+        await query.answer("در حال حذف…")
+        linked_events = get_group_events(event_id)
+        delete_event_group(event_id)
+        for linked in linked_events:
+            if linked.get("platform") != _platform or not linked.get("message_id"):
+                continue
+            try:
+                await context.bot.delete_message(
+                    chat_id=linked["chat_id"], message_id=linked["message_id"]
+                )
+            except Exception:
+                logger.warning(
+                    "Could not delete linked event message %s in chat %s",
+                    linked.get("message_id"), linked.get("chat_id"), exc_info=True,
+                )
+        text, keyboard = build_admin_group_events_page(group_id)
+        await query.edit_message_text(_fmt("🗑 ایونت حذف شد.\n\n" + text), reply_markup=keyboard, **_html_kwargs())
+        return
+
+    if action == "an":
+        user_id = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
+        page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+        platform = parts[3] if len(parts) > 3 and parts[3] else _platform
+        attendees = get_attendees(event_id)
+        if not any(a["user_id"] == user_id and (a.get("platform") or _platform) == platform for a in attendees):
+            await query.answer("این کاربر در فهرست حاضرین نیست.", show_alert=True)
+            return
+        context.user_data["me_action"] = {
+            "type": "rename_att",
+            "event_id": event_id,
+            "user_id": user_id,
+            "page": page,
+            "platform": platform,
+            "chat_id": query.message.chat.id,
+            "target_chat_id": group_id,
+            "admin_panel": True,
+            "manage_message_id": query.message.message_id,
+        }
+        await query.answer()
+        await query.message.reply_text("✏️ نام و نام خانوادگی جدید را بنویس (مثال: علی رضایی):")
+        return
+
+    if action == "ar":
+        user_id = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
+        page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+        platform = parts[3] if len(parts) > 3 and parts[3] else _platform
+        attendees_before = get_attendees(event_id)
+        if not any(a["user_id"] == user_id and (a.get("platform") or _platform) == platform for a in attendees_before):
+            await query.answer("این کاربر در فهرست حاضرین نیست.", show_alert=True)
+            return
+        remove_attendee_from_group(event_id, user_id, platform=platform)
+        attendees = get_attendees(event_id)
+        await query.answer("حضور حذف شد.")
+        if not attendees:
+            await query.edit_message_text(
+                "حضور حذف شد؛ فهرست حاضرین خالی است.",
+                reply_markup=admin_manage_event_keyboard(event_id, group_id, event.get("active", 1)),
+            )
+            return
+        await query.edit_message_text(
+            "حضور حذف شد.",
+            reply_markup=admin_manage_attendees_keyboard(event_id, group_id, attendees, page),
+        )
+        return
+
+    await query.answer("عملیات مدیریت شناخته نشد.", show_alert=True)
 
 
 async def manage_event_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
