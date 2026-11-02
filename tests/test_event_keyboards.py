@@ -9,6 +9,7 @@ from bots.telegram_bot import (
     events_list_keyboard,
     manage_attendees_keyboard,
     manage_event_keyboard,
+    event_draft_keyboard,
 )
 
 
@@ -70,6 +71,12 @@ class EventKeyboardTests(unittest.TestCase):
         self.assertIn('&lt;b&gt;Test&lt;/b&gt;', text)
         self.assertIn('&lt;b&gt;Injected&lt;/b&gt;', text)
         self.assertIn('صفحه 1 از 1', text)
+
+    def test_event_draft_requires_explicit_publish_and_offers_edit(self):
+        callbacks = self._callbacks(event_draft_keyboard())
+        self.assertIn("ec:p", callbacks)
+        self.assertIn("ec:e", callbacks)
+        self.assertIn("ec:x", callbacks)
 
     def test_callback_data_stays_within_platform_limit(self):
         attendees = [
