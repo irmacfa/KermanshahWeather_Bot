@@ -586,7 +586,7 @@ def event_keyboard(event_id: int, attendee_count: int = 0) -> InlineKeyboardMark
             ],
             [
                 InlineKeyboardButton(
-                    f"👥 حاضرین ({attendee_count})", callback_data=f"ev:v|{event_id}"
+                    f"👥 حاضرین ({attendee_count})", callback_data=f"ev:v|{event_id}|0"
                 ),
                 InlineKeyboardButton("✏️ ثبت نام", callback_data=f"ev:n|{event_id}"),
             ],
@@ -608,13 +608,65 @@ def manage_event_keyboard(event_id: int, active: int = 1) -> InlineKeyboardMarku
     return InlineKeyboardMarkup(buttons)
 
 
+def event_attendees_keyboard(event_id: int, page: int, total: int) -> InlineKeyboardMarkup:
+    per_page = 15
+    last_page = max(0, (total - 1) // per_page)
+    page = max(0, min(page, last_page))
+    navigation = []
+    if page > 0:
+        navigation.append(
+            InlineKeyboardButton("⬅️ قبلی", callback_data=f"ev:v|{event_id}|{page - 1}")
+        )
+    if page < last_page:
+        navigation.append(
+            InlineKeyboardButton("بعدی ➡️", callback_data=f"ev:v|{event_id}|{page + 1}")
+        )
+    rows = [navigation] if navigation else []
+    rows.append([InlineKeyboardButton("🔙 بازگشت به برنامه", callback_data=f"ev:b|{event_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_event_attendees_text(event: dict, attendees: list[dict], page: int = 0) -> str:
+    per_page = 15
+    total = len(attendees)
+    last_page = max(0, (total - 1) // per_page)
+    page = max(0, min(page, last_page))
+    start = page * per_page
+    selected = attendees[start:start + per_page]
+    title = html.escape(str(event.get("title") or "برنامه"))
+    lines = [
+        f"👥 <b>حاضرین برنامه: {title}</b>",
+        f"تعداد کل: <b>{total}</b>",
+        f"صفحه {page + 1} از {last_page + 1}",
+        "",
+    ]
+    if not selected:
+        lines.append("هنوز کسی حضور خودش رو ثبت نکرده.")
+    else:
+        for index, attendee in enumerate(selected, start + 1):
+            label = _event_display_name(
+                attendee.get("first_name"),
+                attendee.get("last_name"),
+                attendee.get("username"),
+            )
+            platform = attendee.get("platform")
+            own_platform = event.get("platform")
+            tag = (
+                f" — {PLATFORM_TAG.get(platform, platform)}"
+                if platform and own_platform and platform != own_platform
+                else ""
+            )
+            lines.append(f"{index}. {html.escape(label)}{tag}")
+    return "\n".join(lines)
+
+
 def events_list_keyboard(events: list[dict]) -> InlineKeyboardMarkup:
     rows, row = [], []
     for ev in events:
         title = str(ev.get("title") or "برنامه")
         if len(title) > 40:
             title = title[:39] + "…"
-        row.append(InlineKeyboardButton(title, callback_data=f"ev:v|{ev['event_id']}"))
+        row.append(InlineKeyboardButton(title, callback_data=f"ev:s|{ev['event_id']}"))
         if len(row) == 2:
             rows.append(row)
             row = []
@@ -800,10 +852,12 @@ async def event_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
+    parts = arg.split("|") if arg else []
     try:
-        event_id = int(arg)
+        event_id = int(parts[0])
+        page = int(parts[1]) if len(parts) > 1 else 0
     except (TypeError, ValueError):
-        await query.answer()
+        await query.answer("شناسه برنامه معتبر نیست.", show_alert=True)
         return
 
     event = get_event(event_id)
@@ -819,6 +873,38 @@ async def event_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     if not event.get("active", 1):
         await query.answer("این برنامه بسته شده.", show_alert=True)
+        return
+
+    if kind == "s":
+        await query.answer()
+        attendees = get_attendees(event_id)
+        await query.edit_message_text(
+            _fmt(build_event_text(event, attendees)),
+            reply_markup=event_keyboard(event_id, len(attendees)),
+            **_html_kwargs(),
+        )
+        return
+
+    if kind == "v":
+        attendees = get_attendees(event_id)
+        page_size = 15
+        page = max(0, min(page, max(0, (len(attendees) - 1) // page_size)))
+        await query.answer()
+        await query.edit_message_text(
+            _fmt(build_event_attendees_text(event, attendees, page)),
+            reply_markup=event_attendees_keyboard(event_id, page, len(attendees)),
+            **_html_kwargs(),
+        )
+        return
+
+    if kind == "b":
+        await query.answer()
+        attendees = get_attendees(event_id)
+        await query.edit_message_text(
+            _fmt(build_event_text(event, attendees)),
+            reply_markup=event_keyboard(event_id, len(attendees)),
+            **_html_kwargs(),
+        )
         return
 
     if kind == "a" and get_profile(query.from_user.id, _platform) is None:
