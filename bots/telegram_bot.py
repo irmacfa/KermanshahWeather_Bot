@@ -1906,6 +1906,8 @@ def build_hours_editor() -> tuple[str, InlineKeyboardMarkup]:
 
 def manage_attendees_keyboard(event_id: int, attendees: list[dict], page: int = 0) -> InlineKeyboardMarkup:
     per_page = 8
+    last_page = max(0, (len(attendees) - 1) // per_page)
+    page = max(0, min(page, last_page))
     start = page * per_page
     slice_ = attendees[start : start + per_page]
     buttons = []
@@ -2045,10 +2047,14 @@ async def manage_event_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     if kind == "an":
-        await query.answer()
         user_id = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
         page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
         platform = parts[3] if len(parts) > 3 and parts[3] else _platform
+        attendees = get_attendees(event_id)
+        if not any(a["user_id"] == user_id and (a.get("platform") or _platform) == platform for a in attendees):
+            await query.answer("این کاربر در فهرست حاضرین این برنامه نیست.", show_alert=True)
+            return
+        await query.answer()
         context.user_data["me_action"] = {
             "type": "rename_att",
             "event_id": event_id,
@@ -2062,10 +2068,14 @@ async def manage_event_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     if kind == "ar":
-        await query.answer()
         user_id = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
         page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
         platform = parts[3] if len(parts) > 3 and parts[3] else _platform
+        attendees_before = get_attendees(event_id)
+        if not any(a["user_id"] == user_id and (a.get("platform") or _platform) == platform for a in attendees_before):
+            await query.answer("این کاربر در فهرست حاضرین این برنامه نیست.", show_alert=True)
+            return
+        await query.answer()
         remove_attendee_from_group(event_id, user_id, platform=platform)
         # The refresh queue updates every linked event post on its own platform.
         attendees = get_attendees(event_id)
