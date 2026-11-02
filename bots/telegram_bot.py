@@ -361,12 +361,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if admin_target is not None:
         if OWNER_ID is None or user.id != OWNER_ID or message.chat.type != "private":
             return
-        if not text or len(text) < 3 or len(text) > 80 or "\\n" in text or text.startswith("/"):
+        if not text or len(text) < 3 or len(text) > 80 or "\n" in text or text.startswith("/"):
             await message.reply_text("عنوان باید یک خط و بین ۳ تا ۸۰ نویسه باشد. دوباره عنوان ایونت را بفرست:")
             return
         context.user_data.pop("admin_event_create_target", None)
         context.user_data["admin_event_draft"] = {"title": text, "chat_id": int(admin_target), "user_id": user.id, "platform": _platform}
-        preview = ("📋 <b>پیش‌نمایش ایونت جدید</b>\\n\\n" f"عنوان: <b>{_esc(text)}</b>\\n" f"شناسه گروه مقصد: <code>{int(admin_target)}</code>\\n\\n" "برای ارسال به گروه، انتشار را تأیید کن.")
+        preview = ("📋 <b>پیش‌نمایش ایونت جدید</b>\n\n" f"عنوان: <b>{_esc(text)}</b>\n" f"شناسه گروه مقصد: <code>{int(admin_target)}</code>\n\n" "برای ارسال به گروه، انتشار را تأیید کن.")
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("✅ تأیید و انتشار در گروه", callback_data="ad:evpublish")], [InlineKeyboardButton("❌ لغو", callback_data="ad:evcancel")]])
         await message.reply_text(_fmt(preview), reply_markup=keyboard, **_html_kwargs())
         return
@@ -375,7 +375,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         context.user_data.get("awaiting_event_title")
         and context.user_data.get("awaiting_event_title_chat_id") == message.chat_id
     ):
-        if not text or len(text) < 3 or len(text) > 80 or "\\n" in text or text.startswith("/"):
+        if not text or len(text) < 3 or len(text) > 80 or "\n" in text or text.startswith("/"):
             await message.reply_text("عنوان باید یک خط و بین ۳ تا ۸۰ نویسه باشد. فقط عنوان برنامه را بفرست:")
             return
         context.user_data.pop("awaiting_event_title", None)
@@ -883,7 +883,7 @@ async def event_create_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         await message.reply_text("فقط ادمین می‌تونه برنامه بسازه.")
         return
     title = (title or "").strip()
-    if title and (len(title) < 3 or len(title) > 80 or "\\n" in title or title.startswith("/")):
+    if title and (len(title) < 3 or len(title) > 80 or "\n" in title or title.startswith("/")):
         await message.reply_text("عنوان باید یک خط و بین ۳ تا ۸۰ نویسه باشد.")
         return
     if not title:
@@ -1801,7 +1801,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await query.edit_message_text("❌ انتشار انجام نشد. مطمئن شو ربات هنوز عضو گروه است و اجازه ارسال پیام دارد.")
             return
         context.user_data.pop("admin_event_draft", None)
-        await query.edit_message_text(f"✅ ایونت در گروه «{_esc(target_chat.title or target_chat_id)}» منتشر شد.\\n\\n📅 {_esc(draft['title'])}\\nشناسه ایونت: <code>#{event_id}</code>", **_html_kwargs())
+        await query.edit_message_text(f"✅ ایونت در گروه «{_esc(target_chat.title or target_chat_id)}» منتشر شد.\n\n📅 {_esc(draft['title'])}\nشناسه ایونت: <code>#{event_id}</code>", **_html_kwargs())
         return
 
     if kind == "sites":
@@ -2191,7 +2191,7 @@ def build_admin_event_groups_page() -> tuple[str, InlineKeyboardMarkup]:
     all_groups = get_active_groups_data()
     groups = _unique_active_group_rows()
     if not groups:
-        return ("📅 <b>مدیریت ایونت‌ها</b>\\n\\nگروه فعالی برای انتخاب وجود ندارد.", InlineKeyboardMarkup([[InlineKeyboardButton("🏠 خانه", callback_data="ad:main")]]))
+        return ("📅 <b>مدیریت ایونت‌ها</b>\n\nگروه فعالی برای انتخاب وجود ندارد.", InlineKeyboardMarkup([[InlineKeyboardButton("🏠 خانه", callback_data="ad:main")]]))
     rows = []
     lines = [f"📅 <b>انتخاب گروه برای مدیریت ایونت‌ها</b> ({len(groups)})", ""]
     if len(all_groups) > len(groups):
@@ -2201,7 +2201,7 @@ def build_admin_event_groups_page() -> tuple[str, InlineKeyboardMarkup]:
         label = str(title or chat_id)
         rows.append([InlineKeyboardButton(f"👥 {label[:42]}", callback_data=f"ad:evgroup|{chat_id}")])
     rows.append([InlineKeyboardButton("🏠 خانه", callback_data="ad:main")])
-    return "\\n".join(lines), InlineKeyboardMarkup(rows)
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
 def build_admin_group_events_page(group_id: int) -> tuple[str, InlineKeyboardMarkup]:
@@ -2210,7 +2210,7 @@ def build_admin_group_events_page(group_id: int) -> tuple[str, InlineKeyboardMar
     if group_title is None:
         return ("⚠️ این گروه در فهرست گروه‌های فعال نیست.", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 انتخاب گروه", callback_data="ad:evgroups")]]))
     events = get_all_events_for_chat(group_id, _platform)
-    text = f"📅 <b>ایونت‌های گروه {_esc(group_title)}</b>\\n\\n"
+    text = f"📅 <b>ایونت‌های گروه {_esc(group_title)}</b>\n\n"
     if events:
         text += "برای مدیریت، ایونت را انتخاب کن:"
         base = admin_manage_events_keyboard(events, group_id)
@@ -2218,7 +2218,7 @@ def build_admin_group_events_page(group_id: int) -> tuple[str, InlineKeyboardMar
         rows.insert(-1, [InlineKeyboardButton("➕ ساخت ایونت جدید در این گروه", callback_data=f"ad:evnew|{group_id}")])
         keyboard = InlineKeyboardMarkup(rows)
     else:
-        text += "هنوز ایونتی در این گروه ثبت نشده.\\nمی‌توانی از همین‌جا ایونت بسازی."
+        text += "هنوز ایونتی در این گروه ثبت نشده.\nمی‌توانی از همین‌جا ایونت بسازی."
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➕ ساخت ایونت جدید در این گروه", callback_data=f"ad:evnew|{group_id}")], [InlineKeyboardButton("🔙 انتخاب گروه", callback_data="ad:evgroups")]])
     return text, keyboard
 
