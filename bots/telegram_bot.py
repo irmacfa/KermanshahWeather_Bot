@@ -357,11 +357,25 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     text = (message.text or "").strip()
 
+    admin_target = context.user_data.get("admin_event_create_target")
+    if admin_target is not None:
+        if OWNER_ID is None or user.id != OWNER_ID or message.chat.type != "private":
+            return
+        if not text or len(text) < 3 or len(text) > 80 or "\n" in text or text.startswith("/"):
+            await message.reply_text("عنوان باید یک خط و بین ۳ تا ۸۰ نویسه باشد. دوباره عنوان ایونت را بفرست:")
+            return
+        context.user_data.pop("admin_event_create_target", None)
+        context.user_data["admin_event_draft"] = {"title": text, "chat_id": int(admin_target), "user_id": user.id, "platform": _platform}
+        preview = ("📋 <b>پیش‌نمایش ایونت جدید</b>\n\n" f"عنوان: <b>{_esc(text)}</b>\n" f"شناسه گروه مقصد: <code>{int(admin_target)}</code>\n\n" "برای ارسال به گروه، انتشار را تأیید کن.")
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("✅ تأیید و انتشار در گروه", callback_data="ad:evpublish")], [InlineKeyboardButton("❌ لغو", callback_data="ad:evcancel")]])
+        await message.reply_text(_fmt(preview), reply_markup=keyboard, **_html_kwargs())
+        return
+
     if (
         context.user_data.get("awaiting_event_title")
         and context.user_data.get("awaiting_event_title_chat_id") == message.chat_id
     ):
-        if not text or len(text) < 3 or len(text) > 80 or "\\n" in text or text.startswith("/"):
+        if not text or len(text) < 3 or len(text) > 80 or "\n" in text or text.startswith("/"):
             await message.reply_text("عنوان باید یک خط و بین ۳ تا ۸۰ نویسه باشد. فقط عنوان برنامه را بفرست:")
             return
         context.user_data.pop("awaiting_event_title", None)
@@ -869,7 +883,7 @@ async def event_create_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         await message.reply_text("فقط ادمین می‌تونه برنامه بسازه.")
         return
     title = (title or "").strip()
-    if title and (len(title) < 3 or len(title) > 80 or "\\n" in title or title.startswith("/")):
+    if title and (len(title) < 3 or len(title) > 80 or "\n" in title or title.startswith("/")):
         await message.reply_text("عنوان باید یک خط و بین ۳ تا ۸۰ نویسه باشد.")
         return
     if not title:
@@ -1749,6 +1763,47 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await query.edit_message_text(_fmt(text), reply_markup=keyboard, **_html_kwargs())
         return
 
+    if kind == "evnew":
+        group_id = int(arg) if arg.lstrip("-").isdigit() else None
+        if group_id is None or group_id not in {int(row[0]) for row in _unique_active_group_rows()}:
+            await query.edit_message_text("گروه معتبر نیست یا دیگر فعال نیست.")
+            return
+        context.user_data["admin_event_create_target"] = group_id
+        context.user_data.pop("admin_event_draft", None)
+        await query.message.reply_text("📝 عنوان ایونت جدید را بفرست (۳ تا ۸۰ نویسه):")
+        return
+
+    if kind == "evcancel":
+        context.user_data.pop("admin_event_draft", None)
+        context.user_data.pop("admin_event_create_target", None)
+        await query.edit_message_text("ایجاد ایونت لغو شد؛ چیزی در گروه منتشر نشد.")
+        return
+
+    if kind == "evpublish":
+        draft = context.user_data.get("admin_event_draft")
+        if not draft or draft.get("user_id") != query.from_user.id or draft.get("platform") != _platform:
+            await query.edit_message_text("پیش‌نویس معتبر نیست؛ دوباره ایونت بساز.")
+            return
+        target_chat_id = int(draft["chat_id"])
+        try:
+            target_chat = await context.bot.get_chat(target_chat_id)
+            if target_chat.type not in ("group", "supergroup"):
+                raise ValueError("target is not a group")
+            event_id = create_event(draft["title"], target_chat_id, OWNER_ID, _platform)
+            try:
+                sent = await context.bot.send_message(chat_id=target_chat_id, text=_fmt(build_event_text(get_event(event_id), [])), reply_markup=event_keyboard(event_id, 0), **_html_kwargs())
+            except Exception:
+                delete_event_group(event_id)
+                raise
+            set_event_message(event_id, target_chat_id, sent.message_id)
+        except Exception:
+            logger.exception("Private admin event publish failed for group %s", target_chat_id)
+            await query.edit_message_text("❌ انتشار انجام نشد. مطمئن شو ربات هنوز عضو گروه است و اجازه ارسال پیام دارد.")
+            return
+        context.user_data.pop("admin_event_draft", None)
+        await query.edit_message_text(f"✅ ایونت در گروه «{_esc(target_chat.title or target_chat_id)}» منتشر شد.\n\n📅 {_esc(draft['title'])}\nشناسه ایونت: <code>#{event_id}</code>", **_html_kwargs())
+        return
+
     if kind == "sites":
         page = int(arg) if arg.isdigit() else 0
         text, keyboard = build_sites_page(page)
@@ -2121,41 +2176,51 @@ def admin_manage_attendees_keyboard(
     return InlineKeyboardMarkup(rows)
 
 
+def _unique_active_group_rows() -> list[tuple]:
+    """Collapse same-title records in the admin picker; keep the most recently seen group."""
+    unique = {}
+    for row in get_active_groups_data():
+        chat_id, title, added_by, last_seen = row
+        key = " ".join(str(title or chat_id).casefold().split())
+        if key not in unique:
+            unique[key] = row
+    return list(unique.values())
+
+
 def build_admin_event_groups_page() -> tuple[str, InlineKeyboardMarkup]:
-    groups = get_active_groups_data()
+    all_groups = get_active_groups_data()
+    groups = _unique_active_group_rows()
     if not groups:
-        return (
-            "📅 <b>مدیریت ایونت‌ها</b>\n\nگروه فعالی برای انتخاب وجود ندارد.",
-            InlineKeyboardMarkup([[InlineKeyboardButton("🏠 خانه", callback_data="ad:main")]]),
-        )
+        return ("📅 <b>مدیریت ایونت‌ها</b>\n\nگروه فعالی برای انتخاب وجود ندارد.", InlineKeyboardMarkup([[InlineKeyboardButton("🏠 خانه", callback_data="ad:main")]]))
     rows = []
     lines = [f"📅 <b>انتخاب گروه برای مدیریت ایونت‌ها</b> ({len(groups)})", ""]
+    if len(all_groups) > len(groups):
+        lines.append(f"ℹ️ {len(all_groups) - len(groups)} رکورد هم‌نام تکراری در فهرست ادغام نمایشی شده است.")
+        lines.append("")
     for chat_id, title, added_by, last_seen in groups:
         label = str(title or chat_id)
-        rows.append([InlineKeyboardButton(
-            f"👥 {label[:42]}",
-            callback_data=f"ad:evgroup|{chat_id}",
-        )])
+        rows.append([InlineKeyboardButton(f"👥 {label[:42]}", callback_data=f"ad:evgroup|{chat_id}")])
     rows.append([InlineKeyboardButton("🏠 خانه", callback_data="ad:main")])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
 def build_admin_group_events_page(group_id: int) -> tuple[str, InlineKeyboardMarkup]:
-    groups = {int(row[0]): row[1] for row in get_active_groups_data()}
+    groups = {int(row[0]): row[1] for row in _unique_active_group_rows()}
     group_title = groups.get(group_id)
     if group_title is None:
-        return (
-            "⚠️ این گروه در فهرست گروه‌های فعال نیست.",
-            InlineKeyboardMarkup([[InlineKeyboardButton("🔙 انتخاب گروه", callback_data="ad:evgroups")]]),
-        )
+        return ("⚠️ این گروه در فهرست گروه‌های فعال نیست.", InlineKeyboardMarkup([[InlineKeyboardButton("🔙 انتخاب گروه", callback_data="ad:evgroups")]]))
     events = get_all_events_for_chat(group_id, _platform)
-    if not events:
-        return (
-            f"📅 <b>ایونت‌های گروه {_esc(group_title)}</b>\n\nهنوز ایونتی در این گروه ثبت نشده.",
-            InlineKeyboardMarkup([[InlineKeyboardButton("🔙 انتخاب گروه", callback_data="ad:evgroups")]]),
-        )
-    text = f"📅 <b>ایونت‌های گروه {_esc(group_title)}</b>\n\nبرای مدیریت، ایونت را انتخاب کن:"
-    return text, admin_manage_events_keyboard(events, group_id)
+    text = f"📅 <b>ایونت‌های گروه {_esc(group_title)}</b>\n\n"
+    if events:
+        text += "برای مدیریت، ایونت را انتخاب کن:"
+        base = admin_manage_events_keyboard(events, group_id)
+        rows = [list(row) for row in base.inline_keyboard]
+        rows.insert(-1, [InlineKeyboardButton("➕ ساخت ایونت جدید در این گروه", callback_data=f"ad:evnew|{group_id}")])
+        keyboard = InlineKeyboardMarkup(rows)
+    else:
+        text += "هنوز ایونتی در این گروه ثبت نشده.\nمی‌توانی از همین‌جا ایونت بسازی."
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➕ ساخت ایونت جدید در این گروه", callback_data=f"ad:evnew|{group_id}")], [InlineKeyboardButton("🔙 انتخاب گروه", callback_data="ad:evgroups")]])
+    return text, keyboard
 
 
 async def admin_manage_event_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
