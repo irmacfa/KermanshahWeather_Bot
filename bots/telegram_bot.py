@@ -856,6 +856,10 @@ async def event_create_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     if not await _can_manage_event(update, context):
         await message.reply_text("فقط ادمین می‌تونه برنامه بسازه.")
         return
+    title = (title or "").strip()
+    if title and (len(title) < 3 or len(title) > 80 or "\\n" in title or title.startswith("/")):
+        await message.reply_text("عنوان باید یک خط و بین ۳ تا ۸۰ نویسه باشد.")
+        return
     if not title:
         context.user_data["awaiting_event_title"] = True
         context.user_data["awaiting_event_title_chat_id"] = message.chat_id
