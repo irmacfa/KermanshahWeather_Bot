@@ -1,44 +1,76 @@
-# Kermanshah Weather Bot
+# Kermanshah Weather Bot — Vercel test deployment
 
-ربات پیش‌بینی باد و وضعیت هوا برای سایت‌های پرواز استان کرمانشاه، با پشتیبانی از تلگرام و بله.
+Telegram weather and flying-site forecast bot for Kermanshah province.
 
-## ساختار پروژه
-- bots/telegram_bot.py: نقطه ورود ربات، فرمان‌ها، callbackها، پنل مدیریت و زمان‌بندی گزارش‌ها.
-- core/weather.py: دریافت داده از Windy، پردازش مدل‌های GFS و ICON، محاسبات باد و قالب‌بندی گزارش.
-- core/tracking.py: ذخیره تعامل کاربران، گروه‌ها، برنامه‌ها و حضورها در SQLite.
-- core/sites.py: مختصات و جهت باد مناسب سایت‌های پرواز.
-- core/jalali.py: تبدیل تاریخ میلادی به شمسی.
-- tests/: تست‌های رگرسیون محاسبات و قالب‌بندی.
-- .env.example: نمونه متغیرهای محیطی؛ اطلاعات واقعی فقط در فایل خصوصی سرور قرار گیرد.
+This branch is the isolated Vercel migration test. It is Telegram-only; the existing
+production server and `main` branch remain unchanged until the migration is accepted.
 
-## پیش‌نیازها
-- Python 3.10 یا بالاتر
-- دسترسی شبکه به Telegram/Bale API و Windy
-- کلید API معتبر Windy و توکن ربات
+## Architecture
 
-## نصب و اجرا
+- `api/webhook.py`: Telegram webhook endpoint (`/api/webhook`).
+- `api/cron_refresh.py`: secured event-message refresh endpoint (`/api/cron_refresh`).
+- `api/cron_hourly.py`: secured hourly forecast-report endpoint (`/api/cron_hourly`).
+- `core/pgdb.py`: Neon PostgreSQL connection and schema initialization.
+- `core/tracking.py`: PostgreSQL when `DATABASE_URL` is present; SQLite remains available for local tests.
+- `core/user_state.py`: persisted per-user Telegram conversation state.
+- `bots/telegram_bot.py`: shared Telegram handlers. Polling entrypoint is for local development only.
+
+Vercel Functions are stateless. The webhook stores user conversation state in Neon and
+deduplicates Telegram update IDs. Set the Telegram webhook with `max_connections=1`
+to avoid overlapping updates for the same user's conversation state.
+
+## Required Vercel environment variables
+
+Set these on **Preview only** while testing:
+
+- `DATABASE_URL`: Neon pooled PostgreSQL connection string.
+- `TELEGRAM_BOT_TOKEN`: token for a separate test bot, never the production bot token.
+- `TELEGRAM_WEBHOOK_SECRET`: random secret passed to Telegram's `setWebhook`.
+- `BOT_OWNER_ID`: numeric Telegram user ID of the owner.
+- `WINDY_API_KEY`: Windy API key.
+- `CRON_SECRET`: random secret protecting scheduled-job endpoints.
+
+Do not commit real credentials or put them in GitHub.
+
+## Configure Telegram webhook
+
+After the Preview deployment is ready, set the webhook against that deployment URL:
+
 ```bash
-git clone https://github.com/irmacfa/KermanshahWeather_Bot.git
-cd KermanshahWeather_Bot
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
+curl -X POST "https://api.telegram.org/bot<TEST_BOT_TOKEN>/setWebhook" \
+  -d "url=https://<VERCEL_PREVIEW_HOST>/api/webhook" \
+  -d "secret_token=<TELEGRAM_WEBHOOK_SECRET>" \
+  -d "max_connections=1"
 ```
 
-در فایل .env حداقل TELEGRAM_BOT_TOKEN و WINDY_API_KEY را تنظیم کنید. BOT_OWNER_ID برای پنل مدیریت، TELEGRAM_PROXY_URLS برای پروکسی‌های اختیاری و UNREGISTERED_USERS_CHAT_ID برای گروه فهرست ثبت‌نام‌نشده‌ها استفاده می‌شود.
+Use the test bot token and the exact Preview deployment host. Do not use the production
+bot token while the production server is polling.
 
-اجرای دستی: python -m bots.telegram_bot
+Check the webhook:
 
-## تست
+```bash
+curl "https://api.telegram.org/bot<TEST_BOT_TOKEN>/getWebhookInfo"
+```
+
+## Scheduled jobs
+
+The secured endpoints are:
+
+- `GET /api/cron_refresh`
+- `GET /api/cron_hourly`
+
+They require `Authorization: Bearer <CRON_SECRET>`. Scheduling is intentionally not
+enabled in `vercel.json` until the Vercel plan is confirmed: Hobby permits only one
+execution per day, while Pro supports per-minute schedules. The original bot refreshes
+event posts every five seconds and sends reports hourly, so the scheduler must match
+the actual Vercel plan or use an external scheduler.
+
+## Local tests
+
 ```bash
 python -m unittest discover -s tests -v
-python -m py_compile bots/telegram_bot.py core/*.py
+python -m py_compile api/*.py bots/telegram_bot.py core/*.py
 ```
 
-## امنیت و عملیات
-- فایل .env، دیتابیس SQLite، لاگ‌ها و محیط مجازی نباید وارد Git شوند.
-- توکن ربات، کلید Windy و اعتبارنامه پروکسی را در Issue، Commit یا پیام عمومی قرار ندهید.
-- تغییرات را ابتدا در Branch جداگانه تست و سپس از طریق Pull Request وارد main کنید.
-- پیش از ارتقای نسخه روی سرور از bot_data.db و .env نسخه پشتیبان بگیرید.
-- تغییرات دیتابیس باید با داده‌های قبلی سازگار باشند.
+Without `DATABASE_URL`, tracking uses the existing SQLite backend for regression tests.
+For a real Vercel preview test, use a fresh Neon database and a separate Telegram bot.
