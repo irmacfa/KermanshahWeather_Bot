@@ -335,7 +335,7 @@ def get_settings(platform: str | None = None) -> dict:
     # سایت پیش‌فرض بین هر دو پلتفرم مشترکه؛ اگه هنوز کلید مشترک ثبت نشده از نسخه‌ی قبلی براتون
     shared_default = values.get("default_site_idx")
     if shared_default is None:
-        for old_key in ("default_site_idx_telegram", "default_site_idx_bale"):
+        for old_key in ("default_site_idx_telegram",):
             if values.get(old_key):
                 shared_default = values[old_key]
                 break
@@ -376,7 +376,6 @@ def set_default_site(site_idx: int, platform: str | None = None) -> None:
     _set_setting("default_site_idx", str(site_idx))
     # پاکسازی کلیدهای قدیمی پلتفرم‌محور تا همیشه یه منبع واحد داشته باشیم
     _delete_setting("default_site_idx_telegram")
-    _delete_setting("default_site_idx_bale")
 
 
 def set_report_chat(chat_id: int | None, platform: str | None = None) -> None:
