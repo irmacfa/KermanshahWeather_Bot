@@ -5,10 +5,8 @@ import os
 import re
 import sys
 
-import httpx
 from collections import deque
 from datetime import datetime, timedelta, timezone
-from logging.handlers import RotatingFileHandler
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
@@ -23,7 +21,6 @@ from telegram.ext import (
     TypeHandler,
     filters,
 )
-from telegram.request import HTTPXRequest
 from apscheduler.triggers.cron import CronTrigger
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -83,15 +80,7 @@ _platform = "telegram"
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
-    handlers=[
-        RotatingFileHandler(
-            f"bot_{_platform}.log",
-            maxBytes=5 * 1024 * 1024,
-            backupCount=3,
-            encoding="utf-8",
-        ),
-        logging.StreamHandler(),
-    ],
+    handlers=[logging.StreamHandler()],
 )
 logging.getLogger("apscheduler").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -604,7 +593,7 @@ def _event_display_name(first_name, last_name, username=None) -> str:
     return f"{name} (@{username})" if username else name
 
 
-PLATFORM_TAG = {"telegram": "تلگرام", "bale": "بله"}
+PLATFORM_TAG = {"telegram": "تلگرام"}
 
 
 def build_event_text(event: dict, attendees: list[dict]) -> str:
@@ -1577,39 +1566,6 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     await update.message.reply_text(_fmt(build_admin_home()), reply_markup=admin_main_keyboard(), **_html_kwargs())
 
-
-
-async def select_telegram_proxy(token: str) -> str | None:
-    """Return the first configured SOCKS5 proxy that can reach Telegram."""
-    configured = os.getenv("TELEGRAM_PROXY_URLS", "").strip()
-    if configured:
-        proxy_urls = [item.strip() for item in configured.replace(";", ",").split(",") if item.strip()]
-    else:
-        legacy_proxy = os.getenv("TELEGRAM_PROXY_URL", "").strip()
-        proxy_urls = [legacy_proxy] if legacy_proxy else []
-
-    if not proxy_urls:
-        logger.warning("No Telegram proxy configured; using a direct connection")
-        return None
-
-    test_url = f"https://api.telegram.org/bot{token}/getMe"
-    for index, proxy_url in enumerate(proxy_urls, start=1):
-        try:
-            async with httpx.AsyncClient(proxy=proxy_url, timeout=httpx.Timeout(12.0)) as client:
-                response = await client.get(test_url)
-                response.raise_for_status()
-                payload = response.json()
-                if payload.get("ok") is True:
-                    logger.info("Telegram proxy %s/%s is reachable; selecting it", index, len(proxy_urls))
-                    return proxy_url
-                logger.warning("Telegram proxy %s/%s returned an unexpected Telegram response", index, len(proxy_urls))
-        except (httpx.HTTPError, ValueError) as exc:
-            logger.warning("Telegram proxy %s/%s failed connectivity check: %s", index, len(proxy_urls), type(exc).__name__)
-
-    raise RuntimeError(
-        f"None of the {len(proxy_urls)} configured Telegram proxies could reach Telegram API. "
-        "Check proxy credentials, server status, and TELEGRAM_PROXY_URLS."
-    )
 
 
 def configure_application(app: Application) -> None:
