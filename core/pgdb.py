@@ -89,12 +89,12 @@ class Cursor:
         wants_id = bool(re.match(r"\s*INSERT\s+INTO\s+events\b", statement, re.I))
         if wants_id and "RETURNING" not in sql.upper():
             sql += " RETURNING event_id"
-        cur = self._cursor.execute(sql, params or ())
-        lastrowid = None
+        self._cursor.execute(sql, params or ())
+        self._lastrowid = None
         if wants_id:
-            row = cur.fetchone()
-            lastrowid = int(row[0]) if row else None
-        return Cursor(cur, lastrowid)
+            row = self._cursor.fetchone()
+            self._lastrowid = int(row[0]) if row else None
+        return self
 
 class Connection:
     def __init__(self, raw):
