@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 from typing import Any
 
 import psycopg
@@ -55,7 +56,10 @@ _SCHEMA = (
     """CREATE TABLE IF NOT EXISTS processed_updates (
         update_id BIGINT PRIMARY KEY, processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )""",
-)
+ )
+
+_SCHEMA_READY = False
+_SCHEMA_LOCK = threading.Lock()
 
 def _sql(statement: str) -> str:
     # Project SQL uses '?' only as positional placeholders; SQL literals contain none.
@@ -97,7 +101,7 @@ class Connection:
         self.raw = raw
 
     def execute(self, statement: str, params=()):
-        return Cursor(self.raw.execute(_sql(statement), params or ()))
+        return Cursor(self.raw.cursor()).execute(statement, params)
 
     def cursor(self):
         return Cursor(self.raw.cursor())
@@ -113,14 +117,19 @@ class Connection:
         self.raw.close()
 
 def connect():
+    global _SCHEMA_READY
     url = os.getenv("DATABASE_URL")
     if not url:
         raise RuntimeError("DATABASE_URL is required for the Vercel PostgreSQL deployment")
     raw = psycopg.connect(url, row_factory=tuple_row, connect_timeout=10)
     try:
-        with raw.transaction():
-            for statement in _SCHEMA:
-                raw.execute(statement)
+        if not _SCHEMA_READY:
+            with _SCHEMA_LOCK:
+                if not _SCHEMA_READY:
+                    with raw.transaction():
+                        for statement in _SCHEMA:
+                            raw.execute(statement)
+                    _SCHEMA_READY = True
     except Exception:
         raw.close()
         raise
