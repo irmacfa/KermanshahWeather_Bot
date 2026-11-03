@@ -887,7 +887,8 @@ def get_attendance_users() -> list[dict]:
            FROM event_attendance ea
            JOIN events e ON e.event_id = ea.event_id
            LEFT JOIN user_profiles p ON p.user_id = ea.user_id AND p.platform = e.platform
-           GROUP BY e.platform, ea.user_id
+           GROUP BY e.platform, ea.user_id, ea.first_name, ea.last_name,
+                    ea.username, p.full_name
            ORDER BY last_res DESC"""
     ).fetchall()
     profiles = conn.execute(
