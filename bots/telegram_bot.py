@@ -5,10 +5,8 @@ import os
 import re
 import sys
 
-import httpx
 from collections import deque
 from datetime import datetime, timedelta, timezone
-from logging.handlers import RotatingFileHandler
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
@@ -23,7 +21,6 @@ from telegram.ext import (
     TypeHandler,
     filters,
 )
-from telegram.request import HTTPXRequest
 from apscheduler.triggers.cron import CronTrigger
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -78,26 +75,18 @@ from core.weather import (
 
 load_dotenv()
 
-_platform = os.getenv("BOT_PLATFORM", "telegram").lower()
+_platform = "telegram"
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
-    handlers=[
-        RotatingFileHandler(
-            f"bot_{_platform}.log",
-            maxBytes=5 * 1024 * 1024,
-            backupCount=3,
-            encoding="utf-8",
-        ),
-        logging.StreamHandler(),
-    ],
+    handlers=[logging.StreamHandler()],
 )
 logging.getLogger("apscheduler").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-HTML_OK = _platform != "bale"
+HTML_OK = True
 _TAG_RE = re.compile(r"</?(?:b|strong|i|em|u|s|code|pre|a|span)(?:\s[^>]*)?>", re.IGNORECASE)
 
 
@@ -178,6 +167,43 @@ async def _cleanup_group_messages(context: ContextTypes.DEFAULT_TYPE, chat_id: i
             logger.debug("Could not delete message %s in chat %s (already gone?)", message_id, chat_id)
 
 
+def _schedule_group_cleanup(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_ids: list[int]) -> None:
+    if os.getenv("DATABASE_URL"):
+        from core.pgdb import enqueue_message_deletions
+        enqueue_message_deletions(
+            [{"chat_id": chat_id, "message_id": mid} for mid in message_ids],
+            GROUP_CLEANUP_DELAY,
+        )
+    else:
+        asyncio.create_task(_cleanup_group_messages(context, chat_id, message_ids))
+
+
+def _schedule_flow_cleanup(context: ContextTypes.DEFAULT_TYPE, entries: list[dict], delay: float = 0.0) -> None:
+    if not entries:
+        return
+    if os.getenv("DATABASE_URL"):
+        from core.pgdb import enqueue_message_deletions
+        enqueue_message_deletions(entries, delay)
+    else:
+        asyncio.create_task(_delete_flow_messages(context, entries, delay=delay))
+
+
+async def process_scheduled_deletions(context: ContextTypes.DEFAULT_TYPE) -> None:
+    from core.pgdb import (
+        complete_message_deletion,
+        get_due_message_deletions,
+        retry_message_deletion,
+    )
+    for deletion_id, chat_id, message_id, attempts in get_due_message_deletions():
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except Exception:
+            logger.warning("Scheduled deletion failed for message %s in chat %s", message_id, chat_id, exc_info=True)
+            retry_message_deletion(deletion_id, attempts)
+        else:
+            complete_message_deletion(deletion_id)
+
+
 async def show_sites(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message or update.effective_message
     if message is None:
@@ -186,10 +212,8 @@ async def show_sites(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     sent = await message.chat.send_message("یه سایت رو انتخاب کن 🪂", reply_markup=sites_keyboard(owner_id))
 
     if update.effective_chat.type in ("group", "supergroup"):
-        asyncio.create_task(
-            _cleanup_group_messages(
-                context, update.effective_chat.id, [message.message_id, sent.message_id]
-            )
+        _schedule_group_cleanup(
+            context, update.effective_chat.id, [message.message_id, sent.message_id]
         )
 
 
@@ -604,7 +628,7 @@ def _event_display_name(first_name, last_name, username=None) -> str:
     return f"{name} (@{username})" if username else name
 
 
-PLATFORM_TAG = {"telegram": "تلگرام", "bale": "بله"}
+PLATFORM_TAG = {"telegram": "تلگرام"}
 
 
 def build_event_text(event: dict, attendees: list[dict]) -> str:
@@ -752,10 +776,8 @@ async def show_events(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         "یه برنامه رو انتخاب کن 📅", reply_markup=events_list_keyboard(events)
     )
     if update.effective_chat.type in ("group", "supergroup"):
-        asyncio.create_task(
-            _cleanup_group_messages(
-                context, update.effective_chat.id, [message.message_id, sent.message_id]
-            )
+        _schedule_group_cleanup(
+            context, update.effective_chat.id, [message.message_id, sent.message_id]
         )
 
 
@@ -870,7 +892,7 @@ async def _do_create_event(update: Update, context: ContextTypes.DEFAULT_TYPE, t
             _remember_flow_message(context, chat_id, trigger_id, key="event_flow_msgs")
         entries = context.user_data.pop("event_flow_msgs", [])
         if entries:
-            asyncio.create_task(_delete_flow_messages(context, entries, delay=3))
+            _schedule_flow_cleanup(context, entries, delay=3)
 
 
 EVENT_CREATE_KEYWORDS = (
@@ -1579,76 +1601,8 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 
-async def select_telegram_proxy(token: str) -> str | None:
-    """Return the first configured SOCKS5 proxy that can reach Telegram."""
-    configured = os.getenv("TELEGRAM_PROXY_URLS", "").strip()
-    if configured:
-        proxy_urls = [item.strip() for item in configured.replace(";", ",").split(",") if item.strip()]
-    else:
-        legacy_proxy = os.getenv("TELEGRAM_PROXY_URL", "").strip()
-        proxy_urls = [legacy_proxy] if legacy_proxy else []
-
-    if not proxy_urls:
-        logger.warning("No Telegram proxy configured; using a direct connection")
-        return None
-
-    test_url = f"https://api.telegram.org/bot{token}/getMe"
-    for index, proxy_url in enumerate(proxy_urls, start=1):
-        try:
-            async with httpx.AsyncClient(proxy=proxy_url, timeout=httpx.Timeout(12.0)) as client:
-                response = await client.get(test_url)
-                response.raise_for_status()
-                payload = response.json()
-                if payload.get("ok") is True:
-                    logger.info("Telegram proxy %s/%s is reachable; selecting it", index, len(proxy_urls))
-                    return proxy_url
-                logger.warning("Telegram proxy %s/%s returned an unexpected Telegram response", index, len(proxy_urls))
-        except (httpx.HTTPError, ValueError) as exc:
-            logger.warning("Telegram proxy %s/%s failed connectivity check: %s", index, len(proxy_urls), type(exc).__name__)
-
-    raise RuntimeError(
-        f"None of the {len(proxy_urls)} configured Telegram proxies could reach Telegram API. "
-        "Check proxy credentials, server status, and TELEGRAM_PROXY_URLS."
-    )
-
-
-def main() -> None:
-    global OWNER_ID
-
-    platform = os.getenv("BOT_PLATFORM", "telegram").lower()
-    logger.info("Platform: %s", platform)
-
-    if platform == "bale":
-        token = os.getenv("BALE_BOT_TOKEN")
-        if not token:
-            raise RuntimeError("BALE_BOT_TOKEN در فایل .env تنظیم نشده")
-        base_url = os.getenv("BALE_BASE_URL", "https://tapi.bale.ai/bot")
-        proxy_url = None
-        owner_raw = os.getenv("BALE_OWNER_ID")
-        allowed_updates = ["message", "callback_query", "my_chat_member"]
-    else:
-        token = os.getenv("TELEGRAM_BOT_TOKEN")
-        if not token:
-            raise RuntimeError("TELEGRAM_BOT_TOKEN در فایل .env تنظیم نشده")
-        base_url = None
-        proxy_url = asyncio.run(select_telegram_proxy(token))
-        owner_raw = os.getenv("BOT_OWNER_ID")
-        allowed_updates = Update.ALL_TYPES
-
-    OWNER_ID = int(owner_raw) if owner_raw else None
-
-    builder = Application.builder().token(token)
-    if base_url:
-        builder = builder.base_url(base_url)
-    if proxy_url:
-        request = HTTPXRequest(proxy=proxy_url, connect_timeout=30, read_timeout=30, write_timeout=30, pool_timeout=30, media_write_timeout=60)
-        builder = builder.request(request).get_updates_request(HTTPXRequest(proxy=proxy_url, connect_timeout=30, read_timeout=30, write_timeout=30, pool_timeout=30, media_write_timeout=60))
-        logger.info("Using proxy for %s API connection", platform)
-    else:
-        request = HTTPXRequest(connect_timeout=30, read_timeout=30, write_timeout=30, pool_timeout=30, media_write_timeout=60)
-        builder = builder.request(request).get_updates_request(HTTPXRequest(connect_timeout=30, read_timeout=30, write_timeout=30, pool_timeout=30, media_write_timeout=60))
-
-    app = builder.build()
+def configure_application(app: Application) -> None:
+    """Register the Telegram-only handlers; shared by polling and webhook runtimes."""
     app.add_handler(TypeHandler(Update, drop_stale_updates), group=-2)
     app.add_handler(TypeHandler(Update, track_update), group=-1)
     app.add_handler(CommandHandler("start", start_command))
@@ -1667,20 +1621,24 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_error_handler(error_handler)
 
+
+def main() -> None:
+    """Legacy polling entrypoint, retained for local development only."""
+    global OWNER_ID
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN در فایل .env تنظیم نشده")
+    owner_raw = os.getenv("BOT_OWNER_ID")
+    OWNER_ID = int(owner_raw) if owner_raw else None
+    app = Application.builder().token(token).build()
+    configure_application(app)
     if app.job_queue is not None:
         trigger = CronTrigger(hour="*", minute=0, second=10, timezone=TEHRAN_TZ)
         app.job_queue.run_custom(hourly_report_job, job_kwargs={"trigger": trigger})
         app.job_queue.run_repeating(process_event_refreshes, interval=5, first=5)
-        logger.info("Hourly report job scheduled to run at the start of every hour (%s)", platform)
-
-    logger.info("%s bot starting (polling)...", platform)
-
-    # Python 3.14 no longer implicitly creates a main-thread event loop.
-    # asyncio.run() above also closes its loop after proxy selection.
+    logger.info("Telegram bot starting (polling; local development only)...")
     asyncio.set_event_loop(asyncio.new_event_loop())
-
-    app.run_polling(allowed_updates=allowed_updates)
-
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 async def hourly_report_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2575,7 +2533,7 @@ async def name_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TY
         if user:
             _remember_flow_message(context, query.message.chat_id, query.message.message_id)
         entries = context.user_data.pop("name_flow_msgs", [])
-        asyncio.create_task(_delete_flow_messages(context, entries, delay=2))
+        _schedule_flow_cleanup(context, entries, delay=2)
         action = pending.get("type")
         if action == "sites":
             await show_sites(update, context)
