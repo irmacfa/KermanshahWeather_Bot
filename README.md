@@ -10,6 +10,7 @@ production server and `main` branch remain unchanged until the migration is acce
 - `api/webhook.py`: Telegram webhook endpoint (`/api/webhook`).
 - `api/cron_refresh.py`: secured event-message refresh endpoint (`/api/cron_refresh`).
 - `api/cron_hourly.py`: secured hourly forecast-report endpoint (`/api/cron_hourly`).
+- `api/cron_cleanup.py`: secured delayed-message cleanup endpoint (`/api/cron_cleanup`).
 - `core/pgdb.py`: Neon PostgreSQL connection and schema initialization.
 - `core/tracking.py`: PostgreSQL when `DATABASE_URL` is present; SQLite remains available for local tests.
 - `core/user_state.py`: persisted per-user Telegram conversation state.
@@ -58,6 +59,7 @@ The secured endpoints are:
 
 - `GET /api/cron_refresh`
 - `GET /api/cron_hourly`
+- `GET /api/cron_cleanup`
 
 They require `Authorization: Bearer <CRON_SECRET>`. Scheduling is intentionally not
 enabled in `vercel.json` until the Vercel plan is confirmed: Hobby permits only one
