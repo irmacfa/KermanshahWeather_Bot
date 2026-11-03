@@ -13,7 +13,11 @@ DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 TEHRAN_TZ = ZoneInfo("Asia/Tehran")
 
 
-def _get_conn() -> sqlite3.Connection:
+def _get_conn():
+    # Vercel uses Neon PostgreSQL; the on-premise production bot keeps SQLite.
+    if os.getenv("DATABASE_URL"):
+        from core.pgdb import connect
+        return connect()
     conn = sqlite3.connect(DB_PATH)
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA journal_mode=WAL")
