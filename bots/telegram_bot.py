@@ -78,7 +78,7 @@ from core.weather import (
 
 load_dotenv()
 
-_platform = os.getenv("BOT_PLATFORM", "telegram").lower()
+_platform = "telegram"
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -97,7 +97,7 @@ logging.getLogger("apscheduler").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-HTML_OK = _platform != "bale"
+HTML_OK = True
 _TAG_RE = re.compile(r"</?(?:b|strong|i|em|u|s|code|pre|a|span)(?:\s[^>]*)?>", re.IGNORECASE)
 
 
@@ -1612,43 +1612,8 @@ async def select_telegram_proxy(token: str) -> str | None:
     )
 
 
-def main() -> None:
-    global OWNER_ID
-
-    platform = os.getenv("BOT_PLATFORM", "telegram").lower()
-    logger.info("Platform: %s", platform)
-
-    if platform == "bale":
-        token = os.getenv("BALE_BOT_TOKEN")
-        if not token:
-            raise RuntimeError("BALE_BOT_TOKEN در فایل .env تنظیم نشده")
-        base_url = os.getenv("BALE_BASE_URL", "https://tapi.bale.ai/bot")
-        proxy_url = None
-        owner_raw = os.getenv("BALE_OWNER_ID")
-        allowed_updates = ["message", "callback_query", "my_chat_member"]
-    else:
-        token = os.getenv("TELEGRAM_BOT_TOKEN")
-        if not token:
-            raise RuntimeError("TELEGRAM_BOT_TOKEN در فایل .env تنظیم نشده")
-        base_url = None
-        proxy_url = asyncio.run(select_telegram_proxy(token))
-        owner_raw = os.getenv("BOT_OWNER_ID")
-        allowed_updates = Update.ALL_TYPES
-
-    OWNER_ID = int(owner_raw) if owner_raw else None
-
-    builder = Application.builder().token(token)
-    if base_url:
-        builder = builder.base_url(base_url)
-    if proxy_url:
-        request = HTTPXRequest(proxy=proxy_url, connect_timeout=30, read_timeout=30, write_timeout=30, pool_timeout=30, media_write_timeout=60)
-        builder = builder.request(request).get_updates_request(HTTPXRequest(proxy=proxy_url, connect_timeout=30, read_timeout=30, write_timeout=30, pool_timeout=30, media_write_timeout=60))
-        logger.info("Using proxy for %s API connection", platform)
-    else:
-        request = HTTPXRequest(connect_timeout=30, read_timeout=30, write_timeout=30, pool_timeout=30, media_write_timeout=60)
-        builder = builder.request(request).get_updates_request(HTTPXRequest(connect_timeout=30, read_timeout=30, write_timeout=30, pool_timeout=30, media_write_timeout=60))
-
-    app = builder.build()
+def configure_application(app: Application) -> None:
+    """Register the Telegram-only handlers; shared by polling and webhook runtimes."""
     app.add_handler(TypeHandler(Update, drop_stale_updates), group=-2)
     app.add_handler(TypeHandler(Update, track_update), group=-1)
     app.add_handler(CommandHandler("start", start_command))
@@ -1667,20 +1632,24 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_error_handler(error_handler)
 
+
+def main() -> None:
+    """Legacy polling entrypoint, retained for local development only."""
+    global OWNER_ID
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN در فایل .env تنظیم نشده")
+    owner_raw = os.getenv("BOT_OWNER_ID")
+    OWNER_ID = int(owner_raw) if owner_raw else None
+    app = Application.builder().token(token).build()
+    configure_application(app)
     if app.job_queue is not None:
         trigger = CronTrigger(hour="*", minute=0, second=10, timezone=TEHRAN_TZ)
         app.job_queue.run_custom(hourly_report_job, job_kwargs={"trigger": trigger})
         app.job_queue.run_repeating(process_event_refreshes, interval=5, first=5)
-        logger.info("Hourly report job scheduled to run at the start of every hour (%s)", platform)
-
-    logger.info("%s bot starting (polling)...", platform)
-
-    # Python 3.14 no longer implicitly creates a main-thread event loop.
-    # asyncio.run() above also closes its loop after proxy selection.
+    logger.info("Telegram bot starting (polling; local development only)...")
     asyncio.set_event_loop(asyncio.new_event_loop())
-
-    app.run_polling(allowed_updates=allowed_updates)
-
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 async def hourly_report_job(context: ContextTypes.DEFAULT_TYPE) -> None:
