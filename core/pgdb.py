@@ -61,7 +61,7 @@ _SCHEMA = (
         chat_id BIGINT NOT NULL, message_id BIGINT NOT NULL,
         delete_at TIMESTAMPTZ NOT NULL, attempts INTEGER NOT NULL DEFAULT 0
     )""",
- )
+)
 
 _SCHEMA_READY = False
 _SCHEMA_LOCK = threading.Lock()
@@ -126,7 +126,7 @@ def connect():
     url = os.getenv("DATABASE_URL")
     if not url:
         raise RuntimeError("DATABASE_URL is required for the Vercel PostgreSQL deployment")
-    raw = psycopg.connect(url, row_factory=tuple_row, connect_timeout=10)
+    raw = psycopg.connect(url, row_factory=tuple_row, connect_timeout=10, prepare_threshold=None)
     try:
         if not _SCHEMA_READY:
             with _SCHEMA_LOCK:
