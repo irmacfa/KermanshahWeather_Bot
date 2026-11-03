@@ -9,6 +9,7 @@ from telegram import Update
 from telegram.ext import Application
 
 from core.pgdb import claim_update, connect, load_user_state, save_user_state
+from types import SimpleNamespace
 
 logger = logging.getLogger("telegram-webhook")
 
@@ -37,6 +38,9 @@ async def _process(payload: dict) -> None:
         await application.initialize()
         await application.start()
         await application.process_update(update)
+        # Refresh queued event posts immediately after the update that changed them.
+        from bots.telegram_bot import process_event_refreshes
+        await process_event_refreshes(SimpleNamespace(bot=application.bot))
         if user is not None:
             save_user_state(user.id, dict(application.user_data[user.id]))
     finally:
