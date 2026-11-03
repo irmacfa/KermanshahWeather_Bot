@@ -8,7 +8,7 @@ from http.server import BaseHTTPRequestHandler
 from telegram import Update
 from telegram.ext import Application
 
-from core.pgdb import claim_update, connect, load_user_state, save_user_state
+from core.pgdb import claim_update, complete_update, release_update, load_user_state, save_user_state
 from types import SimpleNamespace
 
 logger = logging.getLogger("telegram-webhook")
@@ -87,10 +87,10 @@ class handler(BaseHTTPRequestHandler):
                 return
             try:
                 asyncio.run(_process(payload))
+                complete_update(update_id)
             except Exception:
                 logger.exception("Telegram update %s failed", update_id)
-                with connect() as conn:
-                    conn.execute("DELETE FROM processed_updates WHERE update_id = ?", (update_id,))
+                release_update(update_id)
                 self._respond(500, {"ok": False, "error": "Update processing failed"})
                 return
             self._respond(200, {"ok": True})
