@@ -167,6 +167,43 @@ async def _cleanup_group_messages(context: ContextTypes.DEFAULT_TYPE, chat_id: i
             logger.debug("Could not delete message %s in chat %s (already gone?)", message_id, chat_id)
 
 
+def _schedule_group_cleanup(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_ids: list[int]) -> None:
+    if os.getenv("DATABASE_URL"):
+        from core.pgdb import enqueue_message_deletions
+        enqueue_message_deletions(
+            [{"chat_id": chat_id, "message_id": mid} for mid in message_ids],
+            GROUP_CLEANUP_DELAY,
+        )
+    else:
+        asyncio.create_task(_cleanup_group_messages(context, chat_id, message_ids))
+
+
+def _schedule_flow_cleanup(context: ContextTypes.DEFAULT_TYPE, entries: list[dict], delay: float = 0.0) -> None:
+    if not entries:
+        return
+    if os.getenv("DATABASE_URL"):
+        from core.pgdb import enqueue_message_deletions
+        enqueue_message_deletions(entries, delay)
+    else:
+        asyncio.create_task(_delete_flow_messages(context, entries, delay=delay))
+
+
+async def process_scheduled_deletions(context: ContextTypes.DEFAULT_TYPE) -> None:
+    from core.pgdb import (
+        complete_message_deletion,
+        get_due_message_deletions,
+        retry_message_deletion,
+    )
+    for deletion_id, chat_id, message_id, attempts in get_due_message_deletions():
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except Exception:
+            logger.warning("Scheduled deletion failed for message %s in chat %s", message_id, chat_id, exc_info=True)
+            retry_message_deletion(deletion_id, attempts)
+        else:
+            complete_message_deletion(deletion_id)
+
+
 async def show_sites(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message or update.effective_message
     if message is None:
@@ -175,10 +212,8 @@ async def show_sites(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     sent = await message.chat.send_message("یه سایت رو انتخاب کن 🪂", reply_markup=sites_keyboard(owner_id))
 
     if update.effective_chat.type in ("group", "supergroup"):
-        asyncio.create_task(
-            _cleanup_group_messages(
-                context, update.effective_chat.id, [message.message_id, sent.message_id]
-            )
+        _schedule_group_cleanup(
+            context, update.effective_chat.id, [message.message_id, sent.message_id]
         )
 
 
@@ -741,10 +776,8 @@ async def show_events(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         "یه برنامه رو انتخاب کن 📅", reply_markup=events_list_keyboard(events)
     )
     if update.effective_chat.type in ("group", "supergroup"):
-        asyncio.create_task(
-            _cleanup_group_messages(
-                context, update.effective_chat.id, [message.message_id, sent.message_id]
-            )
+        _schedule_group_cleanup(
+            context, update.effective_chat.id, [message.message_id, sent.message_id]
         )
 
 
@@ -859,7 +892,7 @@ async def _do_create_event(update: Update, context: ContextTypes.DEFAULT_TYPE, t
             _remember_flow_message(context, chat_id, trigger_id, key="event_flow_msgs")
         entries = context.user_data.pop("event_flow_msgs", [])
         if entries:
-            asyncio.create_task(_delete_flow_messages(context, entries, delay=3))
+            _schedule_flow_cleanup(context, entries, delay=3)
 
 
 EVENT_CREATE_KEYWORDS = (
@@ -2500,7 +2533,7 @@ async def name_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TY
         if user:
             _remember_flow_message(context, query.message.chat_id, query.message.message_id)
         entries = context.user_data.pop("name_flow_msgs", [])
-        asyncio.create_task(_delete_flow_messages(context, entries, delay=2))
+        _schedule_flow_cleanup(context, entries, delay=2)
         action = pending.get("type")
         if action == "sites":
             await show_sites(update, context)
