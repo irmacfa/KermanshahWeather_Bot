@@ -5,6 +5,7 @@ import logging
 import os
 
 from fastapi import FastAPI, Header, HTTPException, Request
+from types import SimpleNamespace
 from telegram import Update
 from telegram.ext import Application
 
@@ -52,11 +53,10 @@ async def telegram_webhook(
     if not claim_update(update_id):
         return {"ok": True, "duplicate": True}
 
-    update = Update.de_json(payload, _build_application().bot)
+    application = _build_application()
+    update = Update.de_json(payload, application.bot)
     if update is None:
         raise HTTPException(status_code=400, detail="Could not decode update")
-
-    application = _build_application()
     user = update.effective_user
     if user is not None:
         application.user_data[user.id].update(load_user_state(user.id))
@@ -82,3 +82,34 @@ async def telegram_webhook(
         except Exception:
             logger.exception("Application shutdown failed")
     return {"ok": True}
+
+
+async def _run_scheduled_job(job):
+    application = _build_application()
+    await application.initialize()
+    try:
+        await job(SimpleNamespace(bot=application.bot))
+    finally:
+        await application.shutdown()
+
+
+def _authorize_cron(authorization: str | None):
+    secret = os.getenv("CRON_SECRET")
+    if not secret or authorization != f"Bearer {secret}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+@app.get("/cron/refresh")
+async def cron_refresh(authorization: str | None = Header(default=None)):
+    _authorize_cron(authorization)
+    from bots.telegram_bot import process_event_refreshes
+    await _run_scheduled_job(process_event_refreshes)
+    return {"ok": True, "job": "event-refresh"}
+
+
+@app.get("/cron/hourly")
+async def cron_hourly(authorization: str | None = Header(default=None)):
+    _authorize_cron(authorization)
+    from bots.telegram_bot import hourly_report_job
+    await _run_scheduled_job(hourly_report_job)
+    return {"ok": True, "job": "hourly-report"}
